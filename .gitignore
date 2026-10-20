@@ -1,0 +1,11 @@
+node_modules/
+.DS_Store
+*.log
+
+# Local runtime data (never committed)
+profiles/
+screenshots/
+experiences/
+chrome-profile/
+
+*.tgz
