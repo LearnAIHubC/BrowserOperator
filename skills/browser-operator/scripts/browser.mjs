@@ -327,6 +327,7 @@ function ensureFingerprint(profile) {
     audioNoise: true,
     webgl: "auto", // "auto" uses the real GPU; "spoof" pins it; "off" disables WebGL
     navigator: false, // JS navigator overrides are detectable; native values are already correct
+    devtoolsFix: true, // defer console.table so CDP serialization is not mistaken for DevTools
   };
   writeSettings(profile, { fingerprint });
   return fingerprint;
@@ -348,6 +349,7 @@ function buildFingerprintScript(fingerprint, userAgent, locale) {
   const navigatorOverride = fingerprint.navigator === true;
   const canvasNoise = fingerprint.canvasNoise !== false;
   const audioNoise = fingerprint.audioNoise !== false;
+  const devtoolsFix = fingerprint.devtoolsFix !== false;
 
   const webglBlock = webglMode === "auto"
     ? ""
@@ -442,6 +444,18 @@ function buildFingerprintScript(fingerprint, userAgent, locale) {
   } catch (e) {}`
     : "";
 
+  const devtoolsBlock = devtoolsFix
+    ? `
+  try {
+    var __origTable = console.table;
+    console.table = __spoof(function () {
+      var __args = arguments;
+      var __self = this;
+      setTimeout(function () { try { __origTable.apply(__self, __args); } catch (e) {} }, 0);
+    });
+  } catch (e) {}`
+    : "";
+
   const navigatorBlock = navigatorOverride
     ? `  try {
     Object.defineProperty(Navigator.prototype, 'userAgent', { get: __spoof(function () { return ${ua}; }), configurable: true });
@@ -469,6 +483,7 @@ function buildFingerprintScript(fingerprint, userAgent, locale) {
   ${webglBlock}
   ${canvasBlock}
   ${audioBlock}
+  ${devtoolsBlock}
 })();`;
 }
 

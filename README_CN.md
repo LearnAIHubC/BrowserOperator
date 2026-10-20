@@ -115,13 +115,14 @@ Session cookie 没有 `Expires` 属性，Chrome 默认在重启后不会重新�
 - **Canvas/Audio**：用 Profile 内固定 seed 加噪，指纹哈希跨会话稳定。
 - **locale/timezone**：取系统设置（macOS 的 `zh-Hans_US` 归一化为 `zh-CN`）。
 - **webdriver**：由 `--disable-blink-features=AutomationControlled` 保持 `false`。
+- **DevTools 误报**：默认把 `console.table` 延迟执行（`devtoolsFix`），因为 CDP 序列化 console 参数会让基于耗时的 DevTools 检测器误判为打开了开发者工具。
 
 ```bash
 "$BROWSER" fingerprint --profile example          # 查看
 "$BROWSER" fingerprint --profile example --reset  # 重新生成（会停 daemon）
 ```
 
-可在 `settings.json` 覆盖：`fingerprint.webgl`（默认 `auto`，可选 `spoof`/`off`）、`fingerprint.navigator`（默认 `false`）、`fingerprint.canvasNoise`、`fingerprint.audioNoise`、`userAgent`、`locale`、`timezone`。
+可在 `settings.json` 覆盖：`fingerprint.webgl`（默认 `auto`，可选 `spoof`/`off`）、`fingerprint.navigator`（默认 `false`）、`fingerprint.canvasNoise`、`fingerprint.audioNoise`、`fingerprint.devtoolsFix`（默认 `true`）、`userAgent`、`locale`、`timezone`。
 
 ## 常用命令
 

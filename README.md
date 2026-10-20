@@ -115,13 +115,14 @@ Each profile creates a single fingerprint on first launch and stores it in `~/.d
 - **Canvas/Audio**: deterministic noise from the profile seed, so the fingerprint hash is stable.
 - **locale/timezone**: taken from the OS (macOS `zh-Hans_US` is normalized to `zh-CN`).
 - **webdriver**: kept `false` by `--disable-blink-features=AutomationControlled`.
+- **DevTools false positive**: `console.table` is deferred by default (`devtoolsFix`), because CDP console serialization makes timing-based devtools detectors think DevTools is open.
 
 ```bash
 "$BROWSER" fingerprint --profile example          # show the stored fingerprint
 "$BROWSER" fingerprint --profile example --reset  # regenerate it (stops the daemon)
 ```
 
-Override via `settings.json`: `fingerprint.webgl` (`auto` by default, `spoof`, `off`), `fingerprint.navigator` (`false` by default), `fingerprint.canvasNoise`, `fingerprint.audioNoise`, `userAgent`, `locale`, `timezone`.
+Override via `settings.json`: `fingerprint.webgl` (`auto` by default, `spoof`, `off`), `fingerprint.navigator` (`false` by default), `fingerprint.canvasNoise`, `fingerprint.audioNoise`, `fingerprint.devtoolsFix` (`true` by default), `userAgent`, `locale`, `timezone`.
 
 ## Common Commands
 

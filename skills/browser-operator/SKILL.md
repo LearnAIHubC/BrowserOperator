@@ -113,6 +113,7 @@ Every profile gets **one stable fingerprint** on first launch, stored in `~/.dsh
 - WebGL: uses the real GPU by default (for example Apple M1 Pro); set `fingerprint.webgl: "spoof"` to pin a renderer or `"off"` to disable WebGL.
 - Canvas/Audio: deterministic noise from the profile seed, so the fingerprint hash is stable across reloads and restarts.
 - `navigator.webdriver`: kept `false` by `--disable-blink-features=AutomationControlled`.
+- DevTools false positives: `console.table` is deferred by default (`fingerprint.devtoolsFix: true`). CDP serialization makes `console.table` slow, which timing-based devtools detectors (e.g. `devtools-detector`) misread as an open DevTools panel.
 - locale/timezone: taken from the OS; macOS `zh-Hans_US` is normalized to `zh-CN`.
 
 Inspect or reset:
@@ -122,7 +123,7 @@ Inspect or reset:
 "$BROWSER" fingerprint --profile mysite --reset  # regenerate it (stops the daemon)
 ```
 
-Overridable keys in `settings.json`: `fingerprint.webgl` (`auto` by default, `spoof`, `off`), `fingerprint.navigator` (`false` by default), `fingerprint.canvasNoise`, `fingerprint.audioNoise`, `userAgent`, `locale`, `timezone`. Do not reset a fingerprint on a logged-in site: the site will see a different device.
+Overridable keys in `settings.json`: `fingerprint.webgl` (`auto` by default, `spoof`, `off`), `fingerprint.navigator` (`false` by default), `fingerprint.canvasNoise`, `fingerprint.audioNoise`, `fingerprint.devtoolsFix` (`true` by default), `userAgent`, `locale`, `timezone`. Do not reset a fingerprint on a logged-in site: the site will see a different device.
 
 ## Commands
 
