@@ -15,6 +15,7 @@ Read this in Chinese: [README_CN.md](README_CN.md)
 - Per-site experience files (`~/.dsh/browser-operator/experiences/<domain>.md`) written after a successful run.
 - `restore-session on` keeps session cookies (for example a Tomcat `JSESSIONID`) across browser restarts.
 - `confirm()` dialogs are accepted automatically and their messages are returned, so save/delete flows are testable.
+- One fixed fingerprint per profile: normal Chrome UA in headless (no `HeadlessChrome`), matching platform/vendor/WebGL, and stable Canvas/Audio noise.
 
 ## Requirements
 
@@ -104,6 +105,24 @@ After a successful exploration, write `~/.dsh/browser-operator/experiences/<doma
 
 A good experience file records the entry URL, selectors, result-ordering rules, traps, and a verification log so the next session can finish the same task in a few commands.
 
+## Fingerprint
+
+Each profile creates a single fingerprint on first launch and stores it in `~/.dsh/browser-operator/profiles/<name>/settings.json`. It stays the same across pages, reloads, headed/headless switches, and daemon restarts.
+
+- **UA**: built from the installed Chrome major version (`Chrome/<major>.0.0.0`); headless never exposes `HeadlessChrome`.
+- **navigator**: `platform`, `vendor`, and `languages` match the host OS.
+- **WebGL**: vendor/renderer derived from the host GPU (for example Apple M1 Pro) and enforced through `getParameter`.
+- **Canvas/Audio**: deterministic noise from the profile seed, so the fingerprint hash is stable.
+- **locale/timezone**: taken from the OS (macOS `zh-Hans_US` is normalized to `zh-CN`).
+- **webdriver**: kept `false` by `--disable-blink-features=AutomationControlled`.
+
+```bash
+"$BROWSER" fingerprint --profile example          # show the stored fingerprint
+"$BROWSER" fingerprint --profile example --reset  # regenerate it (stops the daemon)
+```
+
+Override via `settings.json`: `fingerprint.webgl` (`spoof` by default, `off` disables WebGL), `fingerprint.canvasNoise`, `fingerprint.audioNoise`, `userAgent`, `locale`, `timezone`.
+
 ## Common Commands
 
 | Command | Purpose |
@@ -123,6 +142,7 @@ A good experience file records the entry URL, selectors, result-ordering rules, 
 | `switch --index N` / `switch --url includes` | Switch the active tab |
 | `mode headed` / `mode headless` | Switch mode (restarts Chrome) |
 | `restore-session on\|off` | Persist session cookies across browser restarts |
+| `fingerprint [--reset]` | Show the profile's fixed fingerprint; `--reset` regenerates it |
 | `wait-login [--timeout ms]` | Wait until the login screen disappears |
 | `wait-verification [--timeout ms]` | Wait until a slider/CAPTCHA disappears |
 | `console` / `network` / `debug` | Diagnostics: logs, requests, screenshot, recent dialogs |

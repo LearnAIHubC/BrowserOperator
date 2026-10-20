@@ -15,6 +15,7 @@ BrowserOperator 是一个用于持久化 Chrome 自动化的 Agent Skill。它�
 - 每个站点一份经验文件（`~/.dsh/browser-operator/experiences/<domain>.md`），探索成功后写入。
 - `restore-session on`：重启浏览器后仍能恢复 session cookie（例如 Tomcat 的 `JSESSIONID`）。
 - `confirm()` 弹窗自动确认并记录文案，保存/删除类流程可直接测试。
+- 每个 Profile 一套固定指纹：headless 下也是普通 Chrome UA（无 `HeadlessChrome`），platform/vendor/WebGL 与宿主一致，Canvas/Audio 噪声稳定。
 
 ## 环境要求
 
@@ -104,6 +105,24 @@ Session cookie 没有 `Expires` 属性，Chrome 默认在重启后不会重新�
 
 一份好的经验文件应包含：入口 URL、搜索/结果/详情选择器、结果顺序规则、站点陷阱和验证记录，让下一个会话用少量命令完成同类任务。
 
+## 浏览器指纹
+
+每个 Profile 首次启动时生成一套指纹，保存在 `~/.dsh/browser-operator/profiles/<name>/settings.json`，之后跨刷新、重启、headless/headed 切换都不变。
+
+- **UA**：按本机 Chrome 大版本生成 `Chrome/<major>.0.0.0`，headless 不出现 `HeadlessChrome`。
+- **navigator**：`platform`、`vendor`、`languages` 与系统一致。
+- **WebGL**：从本机 GPU 推导 vendor/renderer（如 Apple M1 Pro），并通过 `getParameter` 固定。
+- **Canvas/Audio**：用 Profile 内固定 seed 加噪，指纹哈希跨会话稳定。
+- **locale/timezone**：取系统设置（macOS 的 `zh-Hans_US` 归一化为 `zh-CN`）。
+- **webdriver**：由 `--disable-blink-features=AutomationControlled` 保持 `false`。
+
+```bash
+"$BROWSER" fingerprint --profile example          # 查看
+"$BROWSER" fingerprint --profile example --reset  # 重新生成（会停 daemon）
+```
+
+可在 `settings.json` 覆盖：`fingerprint.webgl`（默认 `spoof`，`off` 关闭 WebGL）、`fingerprint.canvasNoise`、`fingerprint.audioNoise`、`userAgent`、`locale`、`timezone`。
+
 ## 常用命令
 
 | 命令 | 用途 |
@@ -123,6 +142,7 @@ Session cookie 没有 `Expires` 属性，Chrome 默认在重启后不会重新�
 | `switch --index N` / `switch --url includes` | 切换活动标签页 |
 | `mode headed` / `mode headless` | 切换模式（会重启 Chrome） |
 | `restore-session on\|off` | 跨浏览器重启保留 session cookie |
+| `fingerprint [--reset]` | 查看 Profile 固定指纹；`--reset` 重新生成 |
 | `wait-login [--timeout ms]` | 等待登录页消失 |
 | `wait-verification [--timeout ms]` | 等待滑块/验证页消失 |
 | `console` / `network` / `debug` | 诊断：日志、请求、截图、最近弹窗 |

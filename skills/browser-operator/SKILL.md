@@ -104,6 +104,26 @@ open target site (headless) → reuse existing profile
 - The browser stays open between CLI commands, so `sessionStorage`, tabs, and popups survive while the daemon is running.
 - Never read, print, copy, or upload `chrome-profile/`, cookies, `daemon.json`, or the daemon token. Never ask the user to paste a password into chat; login happens in the visible browser.
 
+## Browser fingerprint (fixed per profile)
+
+Every profile gets **one stable fingerprint** on first launch, stored in `~/.dsh/browser-operator/profiles/<name>/settings.json` under `fingerprint`. It does not change between pages, reloads, headed/headless switches, or daemon restarts.
+
+- UA: built from the installed Chrome major version (`Chrome/<major>.0.0.0`), so headless never exposes `HeadlessChrome`.
+- `navigator.platform/vendor/languages`: match the host OS (`MacIntel`, `Google Inc.`, `zh-CN,zh,en-US,en` on this machine).
+- WebGL vendor/renderer: derived from the host GPU on first launch (for example Apple M1 Pro) and enforced through `getParameter`, so headless reports the same GPU.
+- Canvas/Audio: deterministic noise from the profile seed, so the fingerprint hash is stable across reloads and restarts.
+- `navigator.webdriver`: kept `false` by `--disable-blink-features=AutomationControlled`.
+- locale/timezone: taken from the OS; macOS `zh-Hans_US` is normalized to `zh-CN`.
+
+Inspect or reset:
+
+```bash
+"$BROWSER" fingerprint --profile mysite          # show the stored fingerprint
+"$BROWSER" fingerprint --profile mysite --reset  # regenerate it (stops the daemon)
+```
+
+Overridable keys in `settings.json`: `fingerprint.webgl` (`spoof` by default, `off` disables WebGL), `fingerprint.canvasNoise`, `fingerprint.audioNoise`, `userAgent`, `locale`, `timezone`. Do not reset a fingerprint on a logged-in site: the site will see a different device.
+
 ## Commands
 
 | Command | Purpose |
@@ -111,6 +131,7 @@ open target site (headless) → reuse existing profile
 | `open <url> [--profile name] [--headed|--headless] [--no-auto-headed] [--snapshot]` | Open URL; keeps current mode unless a mode flag is given; auto-heads on manual auth |
 | `mode headed` / `mode headless` | Switch mode (restarts Chrome; with `restore-session on` cookies/login survive) |
 | `restore-session on\|off` | Per-profile: relaunch Chrome with `--restore-last-session` so session cookies survive restarts; stops the daemon so it applies on next `open` |
+| `fingerprint [--reset]` | Show the profile's fixed fingerprint; `--reset` regenerates it and stops the daemon |
 | `goto <url>` | Same as open without snapshot |
 | `state` | Current URL/title/pages/login hints |
 | `snapshot [--mode interactive\|text\|full\|forms] [--selector CSS] [--frame CSS]` | Page structure with suggested selectors |

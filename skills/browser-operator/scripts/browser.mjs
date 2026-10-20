@@ -12,7 +12,7 @@
  */
 
 import { createServer } from "node:http";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import {
   appendFileSync,
@@ -207,12 +207,287 @@ function findChrome() {
   return found;
 }
 
+// ── fingerprint ──────────────────────────────────────────────────
+
+function detectChromeVersion(executablePath) {
+  try {
+    const out = spawnSync(executablePath, ["--version"], { encoding: "utf8", timeout: 5000 });
+    const match = String(out.stdout || out.stderr || "").match(/(\d+\.\d+\.\d+\.\d+)/);
+    return match ? match[1] : "124.0.0.0";
+  } catch {
+    return "124.0.0.0";
+  }
+}
+
+function detectGpu() {
+  if (process.platform === "darwin") {
+    try {
+      const out = spawnSync("system_profiler", ["SPDisplaysDataType"], { encoding: "utf8", timeout: 8000 });
+      const chip = String(out.stdout || "").match(/Chipset Model:\s*(.+)/)?.[1]?.trim();
+      if (chip) {
+        return {
+          vendor: "Google Inc. (Apple)",
+          renderer: `ANGLE (Apple, ANGLE Metal Renderer: ${chip}, Unspecified Version)`,
+        };
+      }
+    } catch {}
+    return {
+      vendor: "Google Inc. (Apple)",
+      renderer: "ANGLE (Apple, ANGLE Metal Renderer: Apple M1, Unspecified Version)",
+    };
+  }
+  if (process.platform === "win32") {
+    return {
+      vendor: "Google Inc. (Intel)",
+      renderer: "ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+    };
+  }
+  return {
+    vendor: "Google Inc. (Intel)",
+    renderer: "ANGLE (Intel, Mesa Intel(R) UHD Graphics 630, OpenGL 4.6)",
+  };
+}
+
+function platformName() {
+  if (process.platform === "darwin") return "MacIntel";
+  if (process.platform === "win32") return "Win32";
+  return "Linux x86_64";
+}
+
+function buildUserAgent(chromeVersion) {
+  const platform = process.platform === "darwin"
+    ? "Macintosh; Intel Mac OS X 10_15_7"
+    : process.platform === "win32"
+      ? "Windows NT 10.0; Win64; x64"
+      : "X11; Linux x86_64";
+  // Real Chrome reduces the UA to MAJOR.0.0.0; the full build only appears in
+  // User-Agent Client Hints. Keep the same shape so UA and UA-CH agree.
+  const major = String(chromeVersion || "124").split(".")[0] || "124";
+  return `Mozilla/5.0 (${platform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36`;
+}
+
+function normalizeLocale(raw) {
+  const parts = String(raw || "").replace(/_/g, "-").split("-").filter(Boolean);
+  const lang = (parts[0] || "").toLowerCase();
+  if (!lang) return "";
+  const script = parts.find((part) => /^[A-Z][a-z]{3}$/.test(part));
+  const region = parts.find((part) => /^[A-Z]{2}$/.test(part) || /^[0-9]{3}$/.test(part));
+  if (lang === "zh") {
+    if (script === "Hant" || ["TW", "HK", "MO"].includes(region)) return "zh-TW";
+    return "zh-CN";
+  }
+  if (script) return region ? `${lang}-${script}-${region}` : `${lang}-${script}`;
+  return region ? `${lang}-${region}` : lang;
+}
+
+function systemLocale() {
+  // Node's Intl locale often reports en-US even when the OS/Chrome is zh-CN,
+  // so prefer the OS setting (macOS AppleLocale) or the POSIX locale env.
+  if (process.platform === "darwin") {
+    try {
+      const out = spawnSync("defaults", ["read", "-g", "AppleLocale"], { encoding: "utf8", timeout: 3000 });
+      const normalized = normalizeLocale(String(out.stdout || "").trim());
+      if (normalized) return normalized;
+    } catch {}
+  }
+  const envLocale = process.env.LC_ALL || process.env.LC_MESSAGES || process.env.LANG || "";
+  const match = envLocale.match(/^([a-zA-Z]{2,3}(?:[-_][a-zA-Z]{2,4})?)/);
+  if (match) return match[1].replace("_", "-");
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().locale || "en-US";
+  } catch {
+    return "en-US";
+  }
+}
+
+function systemTimeZone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Shanghai";
+  } catch {
+    return "Asia/Shanghai";
+  }
+}
+
+/**
+ * The fingerprint is created once per profile and persisted in settings.json,
+ * so every run looks like the same physical machine. Chrome version in the UA
+ * is derived from the installed binary on each launch (never "HeadlessChrome").
+ */
+function ensureFingerprint(profile) {
+  const settings = readSettings(profile);
+  if (settings.fingerprint && settings.fingerprint.seed) return settings.fingerprint;
+  const gpu = detectGpu();
+  const fingerprint = {
+    seed: randomBytes(16).toString("hex"),
+    platform: platformName(),
+    vendor: "Google Inc.",
+    webglVendor: gpu.vendor,
+    webglRenderer: gpu.renderer,
+    canvasNoise: true,
+    audioNoise: true,
+    webgl: "spoof", // "spoof" keeps a normal-looking GPU; "off" disables WebGL
+  };
+  writeSettings(profile, { fingerprint });
+  return fingerprint;
+}
+
+function buildFingerprintScript(fingerprint, userAgent, locale) {
+  const appVersion = userAgent.replace(/^Mozilla\//, "");
+  const languages = [locale, String(locale).split("-")[0], "en-US", "en"];
+  const seed = JSON.stringify(fingerprint.seed);
+  const ua = JSON.stringify(userAgent);
+  const av = JSON.stringify(appVersion);
+  const pf = JSON.stringify(fingerprint.platform || platformName());
+  const vendor = JSON.stringify(fingerprint.vendor || "Google Inc.");
+  const langs = JSON.stringify(Array.from(new Set(languages)));
+  const glVendor = JSON.stringify(fingerprint.webglVendor || "Google Inc. (Apple)");
+  const glRenderer = JSON.stringify(fingerprint.webglRenderer || "ANGLE (Apple, ANGLE Metal Renderer: Apple M1, Unspecified Version)");
+  const webglOff = fingerprint.webgl === "off";
+  const canvasNoise = fingerprint.canvasNoise !== false;
+  const audioNoise = fingerprint.audioNoise !== false;
+
+  const webglBlock = webglOff
+    ? `
+  try {
+    var __getContext = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = __spoof(function (type) {
+      if (type === 'webgl' || type === 'webgl2' || type === 'experimental-webgl') return null;
+      return __getContext.apply(this, arguments);
+    });
+  } catch (e) {}`
+    : `
+  try {
+    var __hookGL = function (proto) {
+      if (!proto || !proto.getParameter) return;
+      var __origGetParameter = proto.getParameter;
+      proto.getParameter = __spoof(function (param) {
+        if (param === 0x9245) return ${glVendor};
+        if (param === 0x9246) return ${glRenderer};
+        return __origGetParameter.apply(this, arguments);
+      });
+    };
+    if (typeof WebGLRenderingContext !== 'undefined') __hookGL(WebGLRenderingContext.prototype);
+    if (typeof WebGL2RenderingContext !== 'undefined') __hookGL(WebGL2RenderingContext.prototype);
+  } catch (e) {}`;
+
+  const canvasBlock = canvasNoise
+    ? `
+  try {
+    var __oTDU = HTMLCanvasElement.prototype.toDataURL;
+    HTMLCanvasElement.prototype.toDataURL = __spoof(function () {
+      try {
+        var c = this.getContext('2d');
+        if (c) {
+          var w = Math.min(this.width, 16), h = Math.min(this.height, 16);
+          if (w > 0 && h > 0) {
+            var d = c.getImageData(0, 0, w, h);
+            for (var i = 0; i < d.data.length; i += 4) {
+              d.data[i] = Math.max(0, Math.min(255, d.data[i] + (__h(i) > 0.5 ? 1 : -1)));
+            }
+            c.putImageData(d, 0, 0);
+          }
+        }
+      } catch (e) {}
+      return __oTDU.apply(this, arguments);
+    });
+    var __oTDB = HTMLCanvasElement.prototype.toBlob;
+    HTMLCanvasElement.prototype.toBlob = __spoof(function () {
+      try {
+        var c = this.getContext('2d');
+        if (c) {
+          var w = Math.min(this.width, 16), h = Math.min(this.height, 16);
+          if (w > 0 && h > 0) {
+            var d = c.getImageData(0, 0, w, h);
+            for (var i = 0; i < d.data.length; i += 4) {
+              d.data[i] = Math.max(0, Math.min(255, d.data[i] + (__h(i + 500) > 0.5 ? 1 : -1)));
+            }
+            c.putImageData(d, 0, 0);
+          }
+        }
+      } catch (e) {}
+      return __oTDB.apply(this, arguments);
+    });
+  } catch (e) {}`
+    : "";
+
+  const audioBlock = audioNoise
+    ? `
+  try {
+    if (typeof AudioBuffer !== 'undefined') {
+      var __oGCD = AudioBuffer.prototype.getChannelData;
+      AudioBuffer.prototype.getChannelData = __spoof(function (ch) {
+        var data = __oGCD.call(this, ch);
+        var k = '__fpn_' + ch;
+        if (!this[k]) {
+          this[k] = true;
+          for (var i = 0; i < data.length; i++) data[i] += (__h(i + ch * 99999 + 3000) - 0.5) * 0.001;
+        }
+        return data;
+      });
+      var __oCFC = AudioBuffer.prototype.copyFromChannel;
+      AudioBuffer.prototype.copyFromChannel = __spoof(function (dest, ch, start) {
+        __oCFC.call(this, dest, ch, start || 0);
+        var k = '__fpcn_' + ch;
+        if (!this[k]) {
+          this[k] = true;
+          for (var i = 0; i < dest.length; i++) dest[i] += (__h(i + ch * 77777 + 4000) - 0.5) * 0.001;
+        }
+      });
+    }
+  } catch (e) {}`
+    : "";
+
+  return `(function () {
+  'use strict';
+  var __seed = ${seed};
+  function __h(o) {
+    var h = 0x811c9dc5, s = __seed + ':' + o;
+    for (var i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = (h * 0x01000193) >>> 0; }
+    return (h & 0x7fffffff) / 0x7fffffff;
+  }
+  var __native = 'function () { [native code] }';
+  function __spoof(fn) {
+    try { fn.toString = function () { return __native; }; } catch (e) {}
+    return fn;
+  }
+  try {
+    Object.defineProperty(Navigator.prototype, 'userAgent', { get: __spoof(function () { return ${ua}; }), configurable: true });
+    Object.defineProperty(Navigator.prototype, 'appVersion', { get: __spoof(function () { return ${av}; }), configurable: true });
+    Object.defineProperty(Navigator.prototype, 'platform', { get: __spoof(function () { return ${pf}; }), configurable: true });
+    Object.defineProperty(Navigator.prototype, 'vendor', { get: __spoof(function () { return ${vendor}; }), configurable: true });
+    Object.defineProperty(Navigator.prototype, 'languages', { get: __spoof(function () { return ${langs}; }), configurable: true });
+  } catch (e) {}
+  try {
+    if (navigator.webdriver) {
+      Object.defineProperty(Navigator.prototype, 'webdriver', { get: function () { return false; }, configurable: true });
+    }
+  } catch (e) {}
+  try {
+    var __bat = {
+      charging: true, chargingTime: 0, dischargingTime: Infinity, level: 1,
+      addEventListener: function () {}, removeEventListener: function () {},
+      dispatchEvent: function () { return true; }
+    };
+    var __getBattery = __spoof(function () { return Promise.resolve(__bat); });
+    Object.defineProperty(Navigator.prototype, 'getBattery', { value: __getBattery, writable: true, configurable: true });
+  } catch (e) {}
+  ${webglBlock}
+  ${canvasBlock}
+  ${audioBlock}
+  Object.defineProperty(window, '__fpInjected', { value: ${JSON.stringify(String(fingerprint.seed).slice(0, 8))}, configurable: false, enumerable: false });
+})();`;
+}
+
 // ── browser launch ───────────────────────────────────────────────
 
 async function launchBrowser(profile, headless) {
   const paths = ensureProfileDirs(profile);
   const executablePath = findChrome();
   const settings = readSettings(profile);
+  const fingerprint = ensureFingerprint(profile);
+  const userAgent = settings.userAgent || buildUserAgent(detectChromeVersion(executablePath));
+  const locale = settings.locale || systemLocale();
+  const timezoneId = settings.timezone || systemTimeZone();
   const args = [
     "--disable-blink-features=AutomationControlled",
     "--no-first-run",
@@ -225,15 +500,19 @@ async function launchBrowser(profile, headless) {
   // restoring a session. This per-profile switch makes logins survive a
   // browser restart (headed/headless switch, daemon stop, crash).
   if (settings.restoreSession) args.push("--restore-last-session");
+  logLine(`fingerprint profile=${profile} platform=${fingerprint.platform} webgl=${String(fingerprint.webglRenderer).slice(0, 60)}`);
   const context = await chromium.launchPersistentContext(paths.chrome, {
     headless,
     executablePath,
     viewport: { width: 1440, height: 900 },
     acceptDownloads: true,
-    locale: "zh-CN",
+    userAgent,
+    locale,
+    timezoneId,
     ignoreHTTPSErrors: true,
     args,
   });
+  await context.addInitScript(buildFingerprintScript(fingerprint, userAgent, locale));
 
   for (const existing of context.pages()) attachDiagnostics(existing);
   context.on("page", (newPage) => attachDiagnostics(newPage));
@@ -1720,6 +1999,7 @@ function parseArgs(argv) {
     "label",
     "append",
     "allow-js",
+    "reset",
     "clear",
     "errors",
     "html",
@@ -1766,7 +2046,7 @@ async function main() {
 
   const command = positional.shift();
   if (!command) {
-    console.error("用法: browser <open|state|snapshot|query|click|fill|press|hover|select|wait|screenshot|switch|wait-login|console|network|debug|wait-verification|mode|close|experience|restore-session|stop|status|profiles> ...");
+    console.error("用法: browser <open|state|snapshot|query|click|fill|press|hover|select|wait|screenshot|switch|wait-login|console|network|debug|wait-verification|mode|close|experience|restore-session|fingerprint|stop|status|profiles> ...");
     process.exit(2);
   }
 
@@ -1858,6 +2138,29 @@ async function main() {
       restoreSession,
       daemonStopped: running,
       note: "下次 open 会用新设置启动；已关闭的浏览器已把 cookie 落盘，能否恢复还取决于服务端 session 是否仍有效",
+    });
+    return;
+  }
+
+  if (command === "fingerprint") {
+    const paths = profilePaths(profile);
+    if (flags.reset) {
+      const settings = readSettings(profile);
+      delete settings.fingerprint;
+      ensureProfileDirs(profile);
+      writeFileSync(paths.settings, JSON.stringify(settings, null, 2), { mode: 0o600 });
+      const info = readJson(paths.daemon);
+      if (info && (await healthCheck(info))) await requestDaemon(info, "/stop").catch(() => {});
+    }
+    const fingerprint = ensureFingerprint(profile);
+    const info = readJson(paths.daemon);
+    const running = Boolean(info && (await healthCheck(info)));
+    print({
+      ok: true,
+      profile,
+      fingerprint: { ...fingerprint, seed: `${String(fingerprint.seed).slice(0, 8)}...` },
+      daemonRunning: running,
+      note: "指纹保存在该 profile 的 settings.json，固定不变；--reset 会重新生成并停止 daemon",
     });
     return;
   }
