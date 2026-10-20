@@ -27,8 +27,8 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { homedir, release as osRelease } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
 
@@ -213,10 +213,36 @@ function detectChromeVersion(executablePath) {
   try {
     const out = spawnSync(executablePath, ["--version"], { encoding: "utf8", timeout: 5000 });
     const match = String(out.stdout || out.stderr || "").match(/(\d+\.\d+\.\d+\.\d+)/);
-    return match ? match[1] : "124.0.0.0";
-  } catch {
-    return "124.0.0.0";
-  }
+    if (match) return match[1];
+  } catch {}
+  // Windows GUI builds usually print nothing for --version. The installed
+  // Chrome keeps the version as a directory name, so read it from there.
+  const candidates = [];
+  try {
+    const base = dirname(executablePath);
+    const dirs = process.platform === "win32"
+      ? [base]
+      : process.platform === "darwin"
+        ? [resolve(base, "..", "Frameworks", "Google Chrome Framework.framework", "Versions")]
+        : [];
+    for (const dir of dirs) {
+      try {
+        for (const name of readdirSync(dir)) {
+          if (/^\d+\.\d+\.\d+\.\d+$/.test(name)) candidates.push(name);
+        }
+      } catch {}
+    }
+  } catch {}
+  if (!candidates.length) return "";
+  candidates.sort((a, b) => {
+    const pa = a.split(".").map(Number);
+    const pb = b.split(".").map(Number);
+    for (let i = 0; i < 4; i += 1) {
+      if (pa[i] !== pb[i]) return pb[i] - pa[i];
+    }
+    return 0;
+  });
+  return candidates[0];
 }
 
 function detectGpu() {
@@ -280,6 +306,52 @@ function normalizeLocale(raw) {
   return region ? `${lang}-${region}` : lang;
 }
 
+function chromeMajor(version) {
+  return String(version || "124").split(".")[0] || "124";
+}
+
+function osPlatformVersion() {
+  if (process.platform === "darwin") {
+    try {
+      const out = spawnSync("sw_vers", ["-productVersion"], { encoding: "utf8", timeout: 3000 });
+      const value = String(out.stdout || "").trim();
+      if (value) return value;
+    } catch {}
+    return "";
+  }
+  if (process.platform === "win32") {
+    const parts = osRelease().split(".").map(Number);
+    // Chrome reports Windows 11 as 19.0.0 (build >= 22000), Windows 10 as 10.0.0.
+    return parts[0] === 10 && parts[2] >= 22000 ? "19.0.0" : "10.0.0";
+  }
+  return "";
+}
+
+function buildUaMetadata(version) {
+  const major = chromeMajor(version);
+  const full = version || `${major}.0.0.0`;
+  const platform = process.platform === "darwin" ? "macOS" : process.platform === "win32" ? "Windows" : "Linux";
+  return {
+    brands: [
+      { brand: "Chromium", version: major },
+      { brand: "Google Chrome", version: major },
+      { brand: "Not(A:Brand", version: "24" },
+    ],
+    fullVersionList: [
+      { brand: "Chromium", version: full },
+      { brand: "Google Chrome", version: full },
+      { brand: "Not(A:Brand", version: "24.0.0.0" },
+    ],
+    platform,
+    platformVersion: osPlatformVersion(),
+    architecture: process.arch === "arm64" ? "arm" : "x86",
+    model: "",
+    mobile: false,
+    bitness: "64",
+    wow64: false,
+  };
+}
+
 function systemLocale() {
   // Node's Intl locale often reports en-US even when the OS/Chrome is zh-CN,
   // so prefer the OS setting (macOS AppleLocale) or the POSIX locale env.
@@ -315,11 +387,16 @@ function systemTimeZone() {
  */
 function ensureFingerprint(profile) {
   const settings = readSettings(profile);
-  if (settings.fingerprint && settings.fingerprint.seed) return settings.fingerprint;
+  const currentPlatform = platformName();
+  const existing = settings.fingerprint;
+  // Keep a profile's fingerprint stable on the same OS, but rebuild it when the
+  // profile is used on a different OS (a MacIntel/Apple GPU on Windows is a
+  // guaranteed mismatch).
+  if (existing && existing.seed && existing.platform === currentPlatform) return existing;
   const gpu = detectGpu();
   const fingerprint = {
     seed: randomBytes(16).toString("hex"),
-    platform: platformName(),
+    platform: currentPlatform,
     vendor: "Google Inc.",
     webglVendor: gpu.vendor,
     webglRenderer: gpu.renderer,
@@ -499,8 +576,8 @@ async function launchBrowser(profile, headless) {
   // prints nothing, e.g. Windows GUI builds).
   const chromeVersion = detectChromeVersion(executablePath) || settings.chromeVersion || "";
   const userAgent = settings.userAgent || buildUserAgent(chromeVersion);
-  const locale = settings.locale || systemLocale();
-  const timezoneId = settings.timezone || systemTimeZone();
+  const locale = settings.locale || null;
+  const timezoneId = settings.timezone || null;
   const args = [
     "--disable-blink-features=AutomationControlled",
     "--no-first-run",
@@ -514,26 +591,53 @@ async function launchBrowser(profile, headless) {
   // browser restart (headed/headless switch, daemon stop, crash).
   if (settings.restoreSession) args.push("--restore-last-session");
   logLine(`fingerprint profile=${profile} platform=${fingerprint.platform} webgl=${String(fingerprint.webglRenderer).slice(0, 60)}`);
+  // Headed Chrome already sends a normal UA; overlaying anything would only
+  // damage UA-CH. Headless needs the "HeadlessChrome" token removed, so only
+  // there we use Playwright's userAgent option (a normal Chrome UA).
   const context = await chromium.launchPersistentContext(paths.chrome, {
     headless,
     executablePath,
     viewport: { width: 1440, height: 900 },
     acceptDownloads: true,
-    userAgent,
-    locale,
-    timezoneId,
+    ...(locale ? { locale } : {}),
+    ...(timezoneId ? { timezoneId } : {}),
     ignoreHTTPSErrors: true,
     args,
   });
-  await context.addInitScript(buildFingerprintScript(fingerprint, userAgent, locale));
-  // Record the version the browser itself reports so future launches stay
-  // consistent even if the binary cannot be queried.
+  // Remember the version the running browser reports; it is used as a
+  // fallback for platforms where the binary cannot be queried.
+  let actualVersion = "";
   try {
-    const actualVersion = context.browser()?.version?.();
-    if (actualVersion && actualVersion !== settings.chromeVersion) {
-      writeSettings(profile, { chromeVersion: actualVersion });
-    }
+    actualVersion = context.browser()?.version?.() || "";
   } catch {}
+  const effectiveVersion = actualVersion || chromeVersion;
+  const effectiveUserAgent = settings.userAgent || buildUserAgent(effectiveVersion);
+  if (headless) {
+    // Headed Chrome already sends a normal UA and native UA-CH. In headless we
+    // only remove "HeadlessChrome" and supply the same UA-CH metadata the real
+    // browser would report (architecture / platformVersion), so pages do not
+    // see a mismatched x86 / 10_15_7 identity.
+    try {
+      const metadata = buildUaMetadata(effectiveVersion);
+      const applyUserAgent = async (page) => {
+        try {
+          const session = await context.newCDPSession(page);
+          await session.send("Emulation.setUserAgentOverride", {
+            userAgent: effectiveUserAgent,
+            userAgentMetadata: metadata,
+          });
+        } catch {}
+      };
+      for (const page of context.pages()) await applyUserAgent(page);
+      context.on("page", (page) => { applyUserAgent(page).catch(() => {}); });
+    } catch {}
+  }
+  await context.addInitScript(buildFingerprintScript(fingerprint, effectiveUserAgent, locale || systemLocale()));
+  if (actualVersion && actualVersion !== settings.chromeVersion) {
+    try {
+      writeSettings(profile, { chromeVersion: actualVersion });
+    } catch {}
+  }
 
   for (const existing of context.pages()) attachDiagnostics(existing);
   context.on("page", (newPage) => attachDiagnostics(newPage));

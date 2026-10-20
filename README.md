@@ -109,7 +109,7 @@ A good experience file records the entry URL, selectors, result-ordering rules, 
 
 Each profile creates a single fingerprint on first launch and stores it in `~/.dsh/browser-operator/profiles/<name>/settings.json`. It stays the same across pages, reloads, headed/headless switches, and daemon restarts.
 
-- **UA**: built from the installed Chrome major version (`Chrome/<major>.0.0.0`); headless never exposes `HeadlessChrome`. The running browser's version is persisted as a fallback when the binary cannot be queried.
+- **UA**: headed Chrome uses its native UA/UA-CH; headless replaces only the `HeadlessChrome` token and supplies matching UA-CH metadata (architecture, platformVersion, bitness). Version comes from the installed binary (Windows: version directory) with the running browser as fallback.
 - **navigator**: left native by default; JS overrides are opt-in because tampering is detectable.
 - **WebGL**: uses the real GPU by default (for example Apple M1 Pro); `"spoof"` pins a renderer, `"off"` disables WebGL.
 - **Canvas/Audio**: deterministic noise from the profile seed, so the fingerprint hash is stable.

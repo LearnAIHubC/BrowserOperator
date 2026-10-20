@@ -108,7 +108,7 @@ open target site (headless) → reuse existing profile
 
 Every profile gets **one stable fingerprint** on first launch, stored in `~/.dsh/browser-operator/profiles/<name>/settings.json` under `fingerprint`. It does not change between pages, reloads, headed/headless switches, or daemon restarts.
 
-- UA: built from the installed Chrome major version (`Chrome/<major>.0.0.0`), so headless never exposes `HeadlessChrome`. The version the running browser reports is persisted and used as a fallback when the binary cannot be queried.
+- UA: headed Chrome uses its native UA and UA-CH. Headless replaces only the `HeadlessChrome` token and supplies matching UA-CH metadata (architecture, platformVersion, bitness), so the page sees the host OS rather than `x86 / 10_15_7`. The Chrome version comes from the installed binary (Windows: the version directory), with the running browser version persisted as a fallback.
 - `navigator`: left **native** by default (`platform`, `vendor`, `languages` already match the host). JS overrides are opt-in (`fingerprint.navigator: true`) because tampering is detectable.
 - WebGL: uses the real GPU by default (for example Apple M1 Pro); set `fingerprint.webgl: "spoof"` to pin a renderer or `"off"` to disable WebGL.
 - Canvas/Audio: deterministic noise from the profile seed, so the fingerprint hash is stable across reloads and restarts.
@@ -123,7 +123,7 @@ Inspect or reset:
 "$BROWSER" fingerprint --profile mysite --reset  # regenerate it (stops the daemon)
 ```
 
-Overridable keys in `settings.json`: `fingerprint.webgl` (`auto` by default, `spoof`, `off`), `fingerprint.navigator` (`false` by default), `fingerprint.canvasNoise`, `fingerprint.audioNoise`, `fingerprint.devtoolsFix` (`true` by default), `userAgent`, `locale`, `timezone`. Do not reset a fingerprint on a logged-in site: the site will see a different device.
+A profile fingerprint is rebuilt automatically if the same profile is opened on a different OS (for example a macOS profile on Windows). Overridable keys in `settings.json`: `fingerprint.webgl` (`auto` by default, `spoof`, `off`), `fingerprint.navigator` (`false` by default), `fingerprint.canvasNoise`, `fingerprint.audioNoise`, `fingerprint.devtoolsFix` (`true` by default), `userAgent`, `locale`, `timezone`. Do not reset a fingerprint on a logged-in site: the site will see a different device.
 
 ## Commands
 
