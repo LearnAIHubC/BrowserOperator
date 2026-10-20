@@ -110,8 +110,8 @@ A good experience file records the entry URL, selectors, result-ordering rules, 
 Each profile creates a single fingerprint on first launch and stores it in `~/.dsh/browser-operator/profiles/<name>/settings.json`. It stays the same across pages, reloads, headed/headless switches, and daemon restarts.
 
 - **UA**: built from the installed Chrome major version (`Chrome/<major>.0.0.0`); headless never exposes `HeadlessChrome`.
-- **navigator**: `platform`, `vendor`, and `languages` match the host OS.
-- **WebGL**: vendor/renderer derived from the host GPU (for example Apple M1 Pro) and enforced through `getParameter`.
+- **navigator**: left native by default; JS overrides are opt-in because tampering is detectable.
+- **WebGL**: uses the real GPU by default (for example Apple M1 Pro); `"spoof"` pins a renderer, `"off"` disables WebGL.
 - **Canvas/Audio**: deterministic noise from the profile seed, so the fingerprint hash is stable.
 - **locale/timezone**: taken from the OS (macOS `zh-Hans_US` is normalized to `zh-CN`).
 - **webdriver**: kept `false` by `--disable-blink-features=AutomationControlled`.
@@ -121,7 +121,7 @@ Each profile creates a single fingerprint on first launch and stores it in `~/.d
 "$BROWSER" fingerprint --profile example --reset  # regenerate it (stops the daemon)
 ```
 
-Override via `settings.json`: `fingerprint.webgl` (`spoof` by default, `off` disables WebGL), `fingerprint.canvasNoise`, `fingerprint.audioNoise`, `userAgent`, `locale`, `timezone`.
+Override via `settings.json`: `fingerprint.webgl` (`auto` by default, `spoof`, `off`), `fingerprint.navigator` (`false` by default), `fingerprint.canvasNoise`, `fingerprint.audioNoise`, `userAgent`, `locale`, `timezone`.
 
 ## Common Commands
 

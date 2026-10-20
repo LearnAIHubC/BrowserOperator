@@ -325,7 +325,8 @@ function ensureFingerprint(profile) {
     webglRenderer: gpu.renderer,
     canvasNoise: true,
     audioNoise: true,
-    webgl: "spoof", // "spoof" keeps a normal-looking GPU; "off" disables WebGL
+    webgl: "auto", // "auto" uses the real GPU; "spoof" pins it; "off" disables WebGL
+    navigator: false, // JS navigator overrides are detectable; native values are already correct
   };
   writeSettings(profile, { fingerprint });
   return fingerprint;
@@ -342,11 +343,15 @@ function buildFingerprintScript(fingerprint, userAgent, locale) {
   const langs = JSON.stringify(Array.from(new Set(languages)));
   const glVendor = JSON.stringify(fingerprint.webglVendor || "Google Inc. (Apple)");
   const glRenderer = JSON.stringify(fingerprint.webglRenderer || "ANGLE (Apple, ANGLE Metal Renderer: Apple M1, Unspecified Version)");
-  const webglOff = fingerprint.webgl === "off";
+  const webglMode = fingerprint.webgl || "auto";
+  const webglOff = webglMode === "off";
+  const navigatorOverride = fingerprint.navigator === true;
   const canvasNoise = fingerprint.canvasNoise !== false;
   const audioNoise = fingerprint.audioNoise !== false;
 
-  const webglBlock = webglOff
+  const webglBlock = webglMode === "auto"
+    ? ""
+    : webglOff
     ? `
   try {
     var __getContext = HTMLCanvasElement.prototype.getContext;
@@ -437,6 +442,16 @@ function buildFingerprintScript(fingerprint, userAgent, locale) {
   } catch (e) {}`
     : "";
 
+  const navigatorBlock = navigatorOverride
+    ? `  try {
+    Object.defineProperty(Navigator.prototype, 'userAgent', { get: __spoof(function () { return ${ua}; }), configurable: true });
+    Object.defineProperty(Navigator.prototype, 'appVersion', { get: __spoof(function () { return ${av}; }), configurable: true });
+    Object.defineProperty(Navigator.prototype, 'platform', { get: __spoof(function () { return ${pf}; }), configurable: true });
+    Object.defineProperty(Navigator.prototype, 'vendor', { get: __spoof(function () { return ${vendor}; }), configurable: true });
+    Object.defineProperty(Navigator.prototype, 'languages', { get: __spoof(function () { return ${langs}; }), configurable: true });
+  } catch (e) {}`
+    : "";
+
   return `(function () {
   'use strict';
   var __seed = ${seed};
@@ -450,31 +465,10 @@ function buildFingerprintScript(fingerprint, userAgent, locale) {
     try { fn.toString = function () { return __native; }; } catch (e) {}
     return fn;
   }
-  try {
-    Object.defineProperty(Navigator.prototype, 'userAgent', { get: __spoof(function () { return ${ua}; }), configurable: true });
-    Object.defineProperty(Navigator.prototype, 'appVersion', { get: __spoof(function () { return ${av}; }), configurable: true });
-    Object.defineProperty(Navigator.prototype, 'platform', { get: __spoof(function () { return ${pf}; }), configurable: true });
-    Object.defineProperty(Navigator.prototype, 'vendor', { get: __spoof(function () { return ${vendor}; }), configurable: true });
-    Object.defineProperty(Navigator.prototype, 'languages', { get: __spoof(function () { return ${langs}; }), configurable: true });
-  } catch (e) {}
-  try {
-    if (navigator.webdriver) {
-      Object.defineProperty(Navigator.prototype, 'webdriver', { get: function () { return false; }, configurable: true });
-    }
-  } catch (e) {}
-  try {
-    var __bat = {
-      charging: true, chargingTime: 0, dischargingTime: Infinity, level: 1,
-      addEventListener: function () {}, removeEventListener: function () {},
-      dispatchEvent: function () { return true; }
-    };
-    var __getBattery = __spoof(function () { return Promise.resolve(__bat); });
-    Object.defineProperty(Navigator.prototype, 'getBattery', { value: __getBattery, writable: true, configurable: true });
-  } catch (e) {}
+  ${navigatorBlock}
   ${webglBlock}
   ${canvasBlock}
   ${audioBlock}
-  Object.defineProperty(window, '__fpInjected', { value: ${JSON.stringify(String(fingerprint.seed).slice(0, 8))}, configurable: false, enumerable: false });
 })();`;
 }
 

@@ -109,8 +109,8 @@ open target site (headless) → reuse existing profile
 Every profile gets **one stable fingerprint** on first launch, stored in `~/.dsh/browser-operator/profiles/<name>/settings.json` under `fingerprint`. It does not change between pages, reloads, headed/headless switches, or daemon restarts.
 
 - UA: built from the installed Chrome major version (`Chrome/<major>.0.0.0`), so headless never exposes `HeadlessChrome`.
-- `navigator.platform/vendor/languages`: match the host OS (`MacIntel`, `Google Inc.`, `zh-CN,zh,en-US,en` on this machine).
-- WebGL vendor/renderer: derived from the host GPU on first launch (for example Apple M1 Pro) and enforced through `getParameter`, so headless reports the same GPU.
+- `navigator`: left **native** by default (`platform`, `vendor`, `languages` already match the host). JS overrides are opt-in (`fingerprint.navigator: true`) because tampering is detectable.
+- WebGL: uses the real GPU by default (for example Apple M1 Pro); set `fingerprint.webgl: "spoof"` to pin a renderer or `"off"` to disable WebGL.
 - Canvas/Audio: deterministic noise from the profile seed, so the fingerprint hash is stable across reloads and restarts.
 - `navigator.webdriver`: kept `false` by `--disable-blink-features=AutomationControlled`.
 - locale/timezone: taken from the OS; macOS `zh-Hans_US` is normalized to `zh-CN`.
@@ -122,7 +122,7 @@ Inspect or reset:
 "$BROWSER" fingerprint --profile mysite --reset  # regenerate it (stops the daemon)
 ```
 
-Overridable keys in `settings.json`: `fingerprint.webgl` (`spoof` by default, `off` disables WebGL), `fingerprint.canvasNoise`, `fingerprint.audioNoise`, `userAgent`, `locale`, `timezone`. Do not reset a fingerprint on a logged-in site: the site will see a different device.
+Overridable keys in `settings.json`: `fingerprint.webgl` (`auto` by default, `spoof`, `off`), `fingerprint.navigator` (`false` by default), `fingerprint.canvasNoise`, `fingerprint.audioNoise`, `userAgent`, `locale`, `timezone`. Do not reset a fingerprint on a logged-in site: the site will see a different device.
 
 ## Commands
 

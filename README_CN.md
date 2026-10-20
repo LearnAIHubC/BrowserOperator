@@ -110,8 +110,8 @@ Session cookie 没有 `Expires` 属性，Chrome 默认在重启后不会重新�
 每个 Profile 首次启动时生成一套指纹，保存在 `~/.dsh/browser-operator/profiles/<name>/settings.json`，之后跨刷新、重启、headless/headed 切换都不变。
 
 - **UA**：按本机 Chrome 大版本生成 `Chrome/<major>.0.0.0`，headless 不出现 `HeadlessChrome`。
-- **navigator**：`platform`、`vendor`、`languages` 与系统一致。
-- **WebGL**：从本机 GPU 推导 vendor/renderer（如 Apple M1 Pro），并通过 `getParameter` 固定。
+- **navigator**：默认不注入，保持原生值（platform/vendor/languages 本身就和系统一致）；JS 覆盖会留下痕迹，改为可选。
+- **WebGL**：默认使用真实 GPU（如 Apple M1 Pro）；`"spoof"` 可固定渲染器，`"off"` 可关闭 WebGL。
 - **Canvas/Audio**：用 Profile 内固定 seed 加噪，指纹哈希跨会话稳定。
 - **locale/timezone**：取系统设置（macOS 的 `zh-Hans_US` 归一化为 `zh-CN`）。
 - **webdriver**：由 `--disable-blink-features=AutomationControlled` 保持 `false`。
@@ -121,7 +121,7 @@ Session cookie 没有 `Expires` 属性，Chrome 默认在重启后不会重新�
 "$BROWSER" fingerprint --profile example --reset  # 重新生成（会停 daemon）
 ```
 
-可在 `settings.json` 覆盖：`fingerprint.webgl`（默认 `spoof`，`off` 关闭 WebGL）、`fingerprint.canvasNoise`、`fingerprint.audioNoise`、`userAgent`、`locale`、`timezone`。
+可在 `settings.json` 覆盖：`fingerprint.webgl`（默认 `auto`，可选 `spoof`/`off`）、`fingerprint.navigator`（默认 `false`）、`fingerprint.canvasNoise`、`fingerprint.audioNoise`、`userAgent`、`locale`、`timezone`。
 
 ## 常用命令
 
