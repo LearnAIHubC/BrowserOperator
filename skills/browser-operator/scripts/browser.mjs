@@ -612,26 +612,23 @@ async function launchBrowser(profile, headless) {
   } catch {}
   const effectiveVersion = actualVersion || chromeVersion;
   const effectiveUserAgent = settings.userAgent || buildUserAgent(effectiveVersion);
-  if (headless) {
-    // Headed Chrome already sends a normal UA and native UA-CH. In headless we
-    // only remove "HeadlessChrome" and supply the same UA-CH metadata the real
-    // browser would report (architecture / platformVersion), so pages do not
-    // see a mismatched x86 / 10_15_7 identity.
-    try {
-      const metadata = buildUaMetadata(effectiveVersion);
-      const applyUserAgent = async (page) => {
-        try {
-          const session = await context.newCDPSession(page);
-          await session.send("Emulation.setUserAgentOverride", {
-            userAgent: effectiveUserAgent,
-            userAgentMetadata: metadata,
-          });
-        } catch {}
-      };
-      for (const page of context.pages()) await applyUserAgent(page);
-      context.on("page", (page) => { applyUserAgent(page).catch(() => {}); });
-    } catch {}
-  }
+  // Use the same UA/UA-CH identity in both modes so switching headed/headless
+  // never changes the fingerprint. Headless is the default; headed is only for
+  // manual login or verification.
+  try {
+    const metadata = buildUaMetadata(effectiveVersion);
+    const applyUserAgent = async (page) => {
+      try {
+        const session = await context.newCDPSession(page);
+        await session.send("Emulation.setUserAgentOverride", {
+          userAgent: effectiveUserAgent,
+          userAgentMetadata: metadata,
+        });
+      } catch {}
+    };
+    for (const page of context.pages()) await applyUserAgent(page);
+    context.on("page", (page) => { applyUserAgent(page).catch(() => {}); });
+  } catch {}
   await context.addInitScript(buildFingerprintScript(fingerprint, effectiveUserAgent, locale || systemLocale()));
   if (actualVersion && actualVersion !== settings.chromeVersion) {
     try {

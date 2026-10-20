@@ -108,7 +108,7 @@ open target site (headless) → reuse existing profile
 
 Every profile gets **one stable fingerprint** on first launch, stored in `~/.dsh/browser-operator/profiles/<name>/settings.json` under `fingerprint`. It does not change between pages, reloads, headed/headless switches, or daemon restarts.
 
-- UA: headed Chrome uses its native UA and UA-CH. Headless replaces only the `HeadlessChrome` token and supplies matching UA-CH metadata (architecture, platformVersion, bitness), so the page sees the host OS rather than `x86 / 10_15_7`. The Chrome version comes from the installed binary (Windows: the version directory), with the running browser version persisted as a fallback.
+- UA/UA-CH: the **same identity is injected in both headed and headless mode**, so switching modes never changes the fingerprint. The UA keeps the real Chrome major version; UA-CH metadata (architecture, platformVersion, bitness) is computed from the host. Headless is the default; headed is only for manual login or verification.
 - `navigator`: left **native** by default (`platform`, `vendor`, `languages` already match the host). JS overrides are opt-in (`fingerprint.navigator: true`) because tampering is detectable.
 - WebGL: uses the real GPU by default (for example Apple M1 Pro); set `fingerprint.webgl: "spoof"` to pin a renderer or `"off"` to disable WebGL.
 - Canvas/Audio: deterministic noise from the profile seed, so the fingerprint hash is stable across reloads and restarts.

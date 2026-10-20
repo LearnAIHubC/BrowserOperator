@@ -109,7 +109,7 @@ Session cookie 没有 `Expires` 属性，Chrome 默认在重启后不会重新�
 
 每个 Profile 首次启动时生成一套指纹，保存在 `~/.dsh/browser-operator/profiles/<name>/settings.json`，之后跨刷新、重启、headless/headed 切换都不变。
 
-- **UA**：有头模式下直接用 Chrome 原生 UA/UA-CH；headless 只替换 `HeadlessChrome`，并同步注入匹配的 UA-CH 元数据（architecture/platformVersion/bitness）。版本从安装目录读取（Windows 读版本子目录），运行中浏览器版本作为回退。
+- **UA/UA-CH**：有头和无头注入**完全相同的一套身份**（真实 Chrome 大版本 + 宿主 architecture/platformVersion/bitness），切换模式指纹不变；默认全程无头。
 - **navigator**：默认不注入，保持原生值（platform/vendor/languages 本身就和系统一致）；JS 覆盖会留下痕迹，改为可选。
 - **WebGL**：默认使用真实 GPU（如 Apple M1 Pro）；`"spoof"` 可固定渲染器，`"off"` 可关闭 WebGL。
 - **Canvas/Audio**：用 Profile 内固定 seed 加噪，指纹哈希跨会话稳定。
