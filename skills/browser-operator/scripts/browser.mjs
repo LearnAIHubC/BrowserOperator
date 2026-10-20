@@ -494,7 +494,11 @@ async function launchBrowser(profile, headless) {
   const executablePath = findChrome();
   const settings = readSettings(profile);
   const fingerprint = ensureFingerprint(profile);
-  const userAgent = settings.userAgent || buildUserAgent(detectChromeVersion(executablePath));
+  // Prefer the installed binary version; fall back to the version the browser
+  // reported on the previous launch (covers platforms where `chrome --version`
+  // prints nothing, e.g. Windows GUI builds).
+  const chromeVersion = detectChromeVersion(executablePath) || settings.chromeVersion || "";
+  const userAgent = settings.userAgent || buildUserAgent(chromeVersion);
   const locale = settings.locale || systemLocale();
   const timezoneId = settings.timezone || systemTimeZone();
   const args = [
@@ -522,6 +526,14 @@ async function launchBrowser(profile, headless) {
     args,
   });
   await context.addInitScript(buildFingerprintScript(fingerprint, userAgent, locale));
+  // Record the version the browser itself reports so future launches stay
+  // consistent even if the binary cannot be queried.
+  try {
+    const actualVersion = context.browser()?.version?.();
+    if (actualVersion && actualVersion !== settings.chromeVersion) {
+      writeSettings(profile, { chromeVersion: actualVersion });
+    }
+  } catch {}
 
   for (const existing of context.pages()) attachDiagnostics(existing);
   context.on("page", (newPage) => attachDiagnostics(newPage));
