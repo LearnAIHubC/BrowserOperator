@@ -1,6 +1,6 @@
 ---
 name: browser-operator
-description: "Persistent Chrome automation for real mouse clicks: headless by default, with dynamic headed switching when the user must log in or complete verification. Hard manual-auth rule: the agent must NEVER perform login or verification — no typing credentials, clicking login/register/send-code/QR, or solving sliders/CAPTCHA; the user does all login and verification in the visible browser. Use for opening sites, reusing existing sessions, snapshots, clicks, hover, forms, iframes, screenshots, console/network debugging. It reads a saved per-site experience before exploring and writes a reusable experience md after a successful run. Profiles keep cookies/localStorage. Triggers include 浏览器点击, 打开网站, 登录网站, 保存登录, 保持登录, real click, browser automation."
+description: "Persistent Chrome automation for real mouse clicks: headless by default, with dynamic headed switching when the user must log in or complete verification. Hard manual-auth rule: the agent must NEVER perform login or verification — no typing credentials, clicking login/register/send-code/QR, or solving sliders/CAPTCHA; the user does all login and verification in the visible browser. Use for opening sites, reusing existing sessions, snapshots, clicks, hover, forms, iframes, screenshots, console/network debugging. Dialogs default to cancel; confirm explicitly. It reads a saved per-site experience before exploring and writes a reusable experience md after a successful run. Profiles keep cookies/localStorage. Triggers include 浏览器点击, 打开网站, 登录网站, 保存登录, 保持登录, real click, browser automation."
 ---
 
 # Browser Operator
@@ -201,6 +201,7 @@ All commands return JSON. `ok:false` means the action failed; inspect `error.cod
 | 表单提交 | 字段选择器/标签、填写方式（fill/type/select）、提交按钮、成功/失败判定选择器；登录/验证永远人工 |
 | 文章阅读 | 标题来源（`state.title` / 可见 h1）、正文容器、摘要截取方式、canonical 干净 URL、分页/懒加载/视频噪音 |
 | 多标签/iframe | 新标签页切换规则、iframe 选择器、`--frame` 用法 |
+| 弹窗/确认 | 默认 `dismiss`（取消）；需要确认时先 `dialog accept`；prompt 用 `--text`；click 返回 `dialogs` 作为证据 |
 
 ## Workflow for a new site
 
@@ -225,6 +226,31 @@ BROWSER="$HOME/.dsh/skills/browser-operator/bin/browser"
 "$BROWSER" click "span:has-text(\"文章\")" --profile wechat --wait-nav
 "$BROWSER" stop --profile wechat
 ```
+
+## Dialogs (important)
+
+Native `alert` / `confirm` / `prompt` / `beforeunload` dialogs default to **dismiss/cancel**. The CLI never auto-confirms them, because that can submit, delete, publish, or navigate unexpectedly.
+
+```bash
+# Default: dismiss (confirm -> false, prompt -> null)
+"$BROWSER" click "#delete" --profile mysite
+
+# Explicitly confirm after inspecting the dialog evidence
+"$BROWSER" dialog accept --profile mysite
+"$BROWSER" click "#delete" --profile mysite
+
+# Fill a prompt
+"$BROWSER" dialog accept --text "yes" --profile mysite
+"$BROWSER" click "#rename" --profile mysite
+
+# Inspect or restore the safe default
+"$BROWSER" dialog status --profile mysite
+"$BROWSER" dialog dismiss --profile mysite
+```
+
+- `click` / `open` return `dialogs` with `type`, `message`, `policy`, and `promptText`.
+- The policy is per daemon; a browser restart restores `dismiss`.
+- Do not confirm login, payment, delete, or publish dialogs automatically. Read the message first and only accept when the action is intended.
 
 ## Automatic debugging
 
@@ -271,6 +297,7 @@ Headed vs headless: headless is the default for automation; use `mode headed` or
 | User cannot see the browser | Run `mode headed` (or `open --headed`); check `status` for the current mode |
 | Login keeps asking | Confirm the same `--profile` is used; do not delete the profile directory |
 | `manual-auth-required` | The page needs the user to log in or complete verification. Do not retry with `--js`/`--force`; ask the user to finish it in the visible Chrome, then use `wait-login` / `wait-verification` |
+| Dialog appears and action is cancelled | Default policy is dismiss. Inspect `dialogs`; if the message is safe and confirmation is intended, run `dialog accept` (prompt text via `--text`) and retry |
 | `challenge.likely:true` / `verification-timeout` | A slider/CAPTCHA is blocking the page. Ask the user to complete it in the visible Chrome, then run `wait-verification` |
 
 ## Notes

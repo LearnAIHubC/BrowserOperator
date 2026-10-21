@@ -698,16 +698,25 @@ function attachDiagnostics(page) {
     } catch {}
   });
   page.on("dialog", (dialog) => {
+    const action = dialogPolicy === "accept" ? "accept" : "dismiss";
+    const promptText = nextDialogText;
+    nextDialogText = "";
     try {
       pushDiagnostic("dialog", {
         page: maskUrl(page.url()),
         type: dialog.type(),
         message: String(dialog.message() || "").slice(0, 1000),
+        policy: action,
+        promptText: promptText || undefined,
       });
     } catch {}
-    // Auto-accept so confirm() gates do not silently cancel page actions.
-    // The message is kept in `dialogs` so callers can still assert on it.
-    dialog.accept().catch(() => {});
+    try {
+      if (action === "accept") {
+        dialog.accept(promptText || undefined).catch(() => {});
+      } else {
+        dialog.dismiss().catch(() => {});
+      }
+    } catch {}
   });
   page.on("request", (request) => {
     requestStarts.set(request, Date.now());
@@ -1407,6 +1416,24 @@ async function clickAction(body) {
 
 // ── console / network / debug ─────────────────────────────────────
 
+async function dialogAction(body = {}) {
+  const action = String(body.action || "status").toLowerCase();
+  if (action === "accept" || action === "dismiss") {
+    dialogPolicy = action;
+    nextDialogText = typeof body.text === "string" ? body.text : "";
+  } else if (action !== "status") {
+    throw fail("bad-request", "dialog 需要 accept、dismiss 或 status");
+  }
+  return {
+    ok: true,
+    action: "dialog",
+    policy: dialogPolicy,
+    nextText: nextDialogText || undefined,
+    recent: diagnostics.dialog.slice(-20),
+    url: maskUrl(getPage().url()),
+  };
+}
+
 async function consoleAction(body = {}) {
   const limit = Math.max(1, Math.min(Number(body.limit) || 50, MAX_CONSOLE));
   const filter = String(body.filter || "").toLowerCase();
@@ -1515,6 +1542,7 @@ async function openAction(body) {
   const page = getPage();
   const url = String(body.url || "").trim();
   if (!url) throw fail("bad-request", "open 需要 url");
+  const dialogCountBefore = diagnostics.dialog.length;
   await page.goto(url, {
     waitUntil: body.waitUntil || "domcontentloaded",
     timeout: Number(body.timeout) || 45_000,
@@ -1524,6 +1552,7 @@ async function openAction(body) {
   activePage = page;
   await page.bringToFront().catch(() => {});
   let state = await stateAction();
+  state.dialogs = diagnostics.dialog.slice(dialogCountBefore);
   if (state.manualAuth?.required && currentHeadless && body.autoHeaded !== false) {
     await switchModeAction({ mode: "headed" });
     state = await stateAction();
@@ -1868,6 +1897,8 @@ function experienceValidateAction(value) {
 
 let currentProfile = DEFAULT_PROFILE;
 let currentHeadless = true;
+let dialogPolicy = "dismiss";
+let nextDialogText = "";
 let daemonServer = null;
 let shuttingDown = false;
 let switchingMode = false;
@@ -1928,6 +1959,7 @@ async function runDaemon(flags) {
           ok: true,
           profile: currentProfile,
           headless: currentHeadless,
+          dialogPolicy,
           pid: process.pid,
           url: maskUrl(getPage().url()),
           title: await getPage().title().catch(() => ""),
@@ -1972,6 +2004,7 @@ async function runDaemon(flags) {
           case "/mode": result = await switchModeAction(body); break;
           case "/wait-login": result = await waitLoginAction(body); break;
           case "/console": result = await consoleAction(body); break;
+          case "/dialog": result = await dialogAction(body); break;
           case "/network": result = await networkAction(body); break;
           case "/debug": result = await debugAction(body); break;
           case "/query": result = await queryAction(body); break;
@@ -2399,6 +2432,11 @@ async function main() {
     }
     case "close": {
       result = await requestDaemon(info, "/close");
+      break;
+    }
+    case "dialog": {
+      const action = positional[0] || "status";
+      result = await requestDaemon(info, "/dialog", { action, text: flags.text || "" });
       break;
     }
     case "mode": {

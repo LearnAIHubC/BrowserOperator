@@ -14,7 +14,7 @@ BrowserOperator 是一个用于持久化 Chrome 自动化的 Agent Skill。它�
 - 自动收集 console、network、dialog；操作失败时自动附带截图与最近请求。
 - 每个站点一份经验文件（`~/.dsh/browser-operator/experiences/<domain>.md`），探索成功后写入。
 - `restore-session on`：重启浏览器后仍能恢复 session cookie（例如 Tomcat 的 `JSESSIONID`）。
-- `confirm()` 弹窗自动确认并记录文案，保存/删除类流程可直接测试。
+- 原生弹窗默认 **dismiss（取消）**；显式 `dialog accept` 才确认，`dialog accept --text` 可填写 prompt；`click` / `open` / `debug` 返回 `dialogs` 证据。
 - 每个 Profile 一套固定指纹：headless 下也是普通 Chrome UA（无 `HeadlessChrome`），platform/vendor/WebGL 与宿主一致，Canvas/Audio 噪声稳定。
 
 ## 环境要求
@@ -142,6 +142,7 @@ Session cookie 没有 `Expires` 属性，Chrome 默认在重启后不会重新�
 | `screenshot [path] [--full-page]` | 保存截图 |
 | `switch --index N` / `switch --url includes` | 切换活动标签页 |
 | `mode headed` / `mode headless` | 切换模式（会重启 Chrome） |
+| `dialog accept [--text value]` / `dialog dismiss` / `dialog status` | 弹窗策略；默认取消 |
 | `restore-session on\|off` | 跨浏览器重启保留 session cookie |
 | `fingerprint [--reset]` | 查看 Profile 固定指纹；`--reset` 重新生成 |
 | `wait-login [--timeout ms]` | 等待登录页消失 |
@@ -157,6 +158,7 @@ Session cookie 没有 `Expires` 属性，Chrome 默认在重启后不会重新�
 - CLI 不打印、不复制、不上传 `chrome-profile/`、cookie、`daemon.json` 或 daemon token。
 - Profile、截图、经验文件都保存在 `~/.dsh/browser-operator/` 下，不会进入本仓库。
 - 默认 headless；只有站点需要人工登录时才显示浏览器窗口。
+- 弹窗绝不自动确认；默认取消，需要确认必须显式执行 `dialog accept`。
 - 无遥测；除你打开的页面外不发起其他网络请求。
 
 ## 项目结构

@@ -14,7 +14,7 @@ Read this in Chinese: [README_CN.md](README_CN.md)
 - Console, network, and dialog capture, with a screenshot attached to every failed action.
 - Per-site experience files (`~/.dsh/browser-operator/experiences/<domain>.md`) written after a successful run.
 - `restore-session on` keeps session cookies (for example a Tomcat `JSESSIONID`) across browser restarts.
-- `confirm()` dialogs are accepted automatically and their messages are returned, so save/delete flows are testable.
+- Native dialogs default to **dismiss/cancel**; `dialog accept` confirms explicitly and `dialog accept --text` fills prompts. `dialogs` evidence is returned by `click` / `open` / `debug`.
 - One fixed fingerprint per profile: normal Chrome UA in headless (no `HeadlessChrome`), matching platform/vendor/WebGL, and stable Canvas/Audio noise.
 
 ## Requirements
@@ -142,6 +142,7 @@ Override via `settings.json`: `fingerprint.webgl` (`auto` by default, `spoof`, `
 | `screenshot [path] [--full-page]` | Save a screenshot |
 | `switch --index N` / `switch --url includes` | Switch the active tab |
 | `mode headed` / `mode headless` | Switch mode (restarts Chrome) |
+| `dialog accept [--text value]` / `dialog dismiss` / `dialog status` | Dialog policy; default is dismiss/cancel |
 | `restore-session on\|off` | Persist session cookies across browser restarts |
 | `fingerprint [--reset]` | Show the profile's fixed fingerprint; `--reset` regenerates it |
 | `wait-login [--timeout ms]` | Wait until the login screen disappears |
@@ -157,6 +158,7 @@ Override via `settings.json`: `fingerprint.webgl` (`auto` by default, `spoof`, `
 - The CLI never prints, copies, or uploads `chrome-profile/`, cookies, `daemon.json`, or the daemon token.
 - Profiles, screenshots, and experience files stay under `~/.dsh/browser-operator/` and are never committed to this repository.
 - The default mode is headless; the browser becomes visible only when the site requires manual authentication.
+- Dialogs are never auto-confirmed. The default is dismiss/cancel; confirmation requires an explicit `dialog accept`.
 - No telemetry and no network calls other than the pages you open.
 
 ## Project Layout
