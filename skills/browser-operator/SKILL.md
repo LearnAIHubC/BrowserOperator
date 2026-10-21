@@ -45,6 +45,16 @@ Use this skill for **all** browser click/automation work. Do not write one-off P
 - 不写 cookies、token、密码、手机号、完整个人数据；只写站点结构和选择器。
 - 写完用 `"$BROWSER" experience validate <domain>` 校验格式。
 
+**任务收尾检查（强制，给最终答复前）**：
+
+1. 再执行一次 `"$BROWSER" experience show <domain>`。
+2. 对照本次操作，确认是否出现新的入口 URL、选择器、结果读取方式、失败兜底或陷阱。
+3. 有新增/变化：更新经验文件，在“验证记录”追加一行，再执行 `experience validate <domain>`。
+4. 没有新增/变化：也要在“验证记录”追加一行简短记录（日期、任务、结果、备注“无新增”），证明本次已检查，避免下次重复探索。
+5. 未完成以上检查，不得给最终答复。
+
+这一步是硬性收尾条件。经验文件的价值在于“下一次只看 md 就能照做”，不记录等于本次探索白做。
+
 **新会话验证标准**：不依赖旧对话，只读这份 md，就能在少量命令内完成同类任务。验证后再把结果补充到“验证记录”。
 
 ## Quick start
@@ -212,7 +222,8 @@ All commands return JSON. `ok:false` means the action failed; inspect `error.cod
 4. `click <selector>` with `--wait-for` / `--wait-nav` when the page loads asynchronously.
 5. After each click, check `trusted`, `effect`, and `warning`; take a screenshot if the result is unclear.
 6. 成功后按 `references/experience-template.md` 写/更新 `~/.dsh/browser-operator/experiences/<domain>.md`，并 `experience validate <domain>`。
-7. When done, `stop` to flush the profile. The next `open` with the same profile is already logged in.
+7. 给最终答复前执行“任务收尾检查”：再 `experience show <domain>`，有变化更新并 validate；无变化也补一行“验证记录”。
+8. When done, `stop` to flush the profile. The next `open` with the same profile is already logged in.
 
 Example (WeChat public account):
 

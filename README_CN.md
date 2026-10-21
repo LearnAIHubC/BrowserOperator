@@ -105,6 +105,8 @@ Session cookie 没有 `Expires` 属性，Chrome 默认在重启后不会重新�
 
 一份好的经验文件应包含：入口 URL、搜索/结果/详情选择器、结果顺序规则、站点陷阱和验证记录，让下一个会话用少量命令完成同类任务。
 
+给最终答复前必须再执行一次 `experience show <domain>`：有新增或变化就更新经验并追加验证记录；没有变化也要补一行“无新增”。未完成这个收尾检查，不得结束任务。
+
 ## 浏览器指纹
 
 每个 Profile 首次启动时生成一套指纹，保存在 `~/.dsh/browser-operator/profiles/<name>/settings.json`，之后跨刷新、重启、headless/headed 切换都不变。

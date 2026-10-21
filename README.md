@@ -105,6 +105,8 @@ After a successful exploration, write `~/.dsh/browser-operator/experiences/<doma
 
 A good experience file records the entry URL, selectors, result-ordering rules, traps, and a verification log so the next session can finish the same task in a few commands.
 
+Before giving the final answer, run `experience show <domain>` again. If the task added or changed anything, update the file and append a verification row; if nothing changed, still append a short "no new findings" row. Do not finish the task before this close-out check.
+
 ## Fingerprint
 
 Each profile creates a single fingerprint on first launch and stores it in `~/.dsh/browser-operator/profiles/<name>/settings.json`. It stays the same across pages, reloads, headed/headless switches, and daemon restarts.
