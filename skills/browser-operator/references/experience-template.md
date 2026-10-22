@@ -28,6 +28,8 @@ tags: [<tag1>, <tag2>]
 | 结果标题链接 | `<selector>` | 按 DOM 顺序，`--nth` 从 1 开始 |
 | 详情标题 | `state.title` | 不要依赖页面内 h1 |
 | 详情正文 | `snapshot --mode text` | 或 `query '<selector>'` |
+| 拖拽源/目标 | `<source selector>` / `<target selector>` | 记录 `--nth`/`--target-nth`、`--method`、drop 位置 |
+| 复杂组件 | `<datepicker/overlay/rich editor selector>` | 不要只 `fill`；先 `wait` 可见容器，再点可见项 |
 
 ## 结果读取
 
@@ -44,6 +46,8 @@ tags: [<tag1>, <tag2>]
 - 登录/验证/滑块必须由用户完成；不要点击或尝试绕过。
 - `<站点特有陷阱：广告、懒加载、弹窗、iframe、重定向、编码、分页...>`
 - 列表页选择器在详情页可能只剩分享栏/推荐位，不要直接复用；先重新 `query`。
+- 拖拽：先 `drag`，观察 `effect.mutations/urlChanged`；无变化时再考虑 `--method mouse` 或 `--method js --allow-js`，不要直接用 DB/内部接口绕过 UI。
+- 日期/弹层/富文本：`fill` 可能被 JS 覆盖，优先点击组件并操作可见的日期格/选项；用 `wait` 等容器出现。
 - 失败时先 `debug` 看截图、console、network；不要重复同一个失败选择器。
 
 ## 空页面/异常兜底

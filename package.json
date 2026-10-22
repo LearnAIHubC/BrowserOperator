@@ -1,6 +1,6 @@
 {
   "name": "@learnaihubc/browser-operator",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Agent skill for persistent Chrome automation with real mouse clicks, manual login, and per-site experience memory.",
   "bin": {
     "browser-operator": "bin/install.mjs"

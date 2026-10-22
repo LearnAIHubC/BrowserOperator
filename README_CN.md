@@ -10,7 +10,7 @@ BrowserOperator 是一个用于持久化 Chrome 自动化的 Agent Skill。它�
 - 一个站点一个持久化 Chrome Profile，cookie 与 `localStorage` 跨命令、跨会话保留。
 - 默认 headless；页面需要登录或人机验证时自动切到有头窗口。
 - 登录保护：Agent 绝不输入账号密码、不点登录按钮、不处理滑块/CAPTCHA。
-- 提供 snapshot、query、click、fill、select、hover、press、wait、switch、screenshot 等原子操作。
+- 提供 snapshot、query、click、drag、fill、select、hover、press、wait、switch、screenshot 等原子操作。
 - 自动收集 console、network、dialog；操作失败时自动附带截图与最近请求。
 - 每个站点一份经验文件（`~/.dsh/browser-operator/experiences/<domain>.md`），探索成功后写入。
 - `restore-session on`：重启浏览器后仍能恢复 session cookie（例如 Tomcat 的 `JSESSIONID`）。
@@ -79,7 +79,7 @@ BROWSER="$HOME/.dsh/skills/browser-operator/bin/browser"
 "$BROWSER" wait-login --profile intranet --timeout 300000
 ```
 
-登录/验证进行中时，CLI 会拦截 `click`、`fill`、`press`、`select`；`snapshot`、`query`、`console`、`network`、`screenshot`、`debug` 仍然可用。
+登录/验证进行中时，CLI 会拦截 `click`、`drag`、`eval`、`fill`、`press`、`select`；`snapshot`、`query`、`console`、`network`、`screenshot`、`debug` 仍然可用。
 
 Session cookie 没有 `Expires` 属性，Chrome 默认在重启后不会重新加载。需要跨重启保留登录时，为 Profile 开启会话恢复：
 
@@ -95,6 +95,12 @@ Session cookie 没有 `Expires` 属性，Chrome 默认在重启后不会重新�
 
 ```bash
 "$BROWSER" experience show example.com
+```
+
+如果 `open` 后发生重定向，用 `experience current` 按最终页面 host 读取经验：
+
+```bash
+"$BROWSER" experience current --profile example
 ```
 
 探索成功后，按 `references/experience-template.md` 写入 `~/.dsh/browser-operator/experiences/<domain>.md`，并校验格式：
@@ -136,6 +142,8 @@ Session cookie 没有 `Expires` 属性，Chrome 默认在重启后不会重新�
 | `snapshot [--mode interactive\|text\|full\|forms] [--selector CSS]` | 页面结构 + 推荐选择器 |
 | `query <selector> [--limit N] [--html] [--all-attrs]` | 读取 DOM 节点（含非交互元素） |
 | `click <selector> [--nth N] [--wait-for CSS] [--wait-nav]` | 真实鼠标点击并验证效果 |
+| `drag <source> <target> [--nth N] [--target-nth N] [--steps N] [--method auto\|dragTo\|mouse\|js]` | 真实拖拽；auto 先真实鼠标再 dragTo；`js` 需 `--allow-js` |
+| `eval <expression>` | 显式 JS 逃生口，用于页面自定义处理器；不绕过登录/验证 |
 | `fill <selector> <value> [--type] [--append]` | 填写输入框；`--type` 逐字输入 |
 | `press <key>` | 发送按键 |
 | `hover <selector>` | 真实鼠标悬停 |
@@ -152,7 +160,7 @@ Session cookie 没有 `Expires` 属性，Chrome 默认在重启后不会重新�
 | `console` / `network` / `debug` | 诊断：日志、请求、截图、最近弹窗 |
 | `close` / `stop` / `status` | 标签页与 daemon 生命周期 |
 | `profiles` | 列出已知 Profile（不含敏感信息） |
-| `experience list\|path\|show\|validate` | 站点经验操作 |
+| `experience list\|path\|show\|validate\|current` | 站点经验操作；`current` 解析当前页面 host |
 
 ## 安全模型
 
@@ -161,6 +169,7 @@ Session cookie 没有 `Expires` 属性，Chrome 默认在重启后不会重新�
 - Profile、截图、经验文件都保存在 `~/.dsh/browser-operator/` 下，不会进入本仓库。
 - 默认 headless；只有站点需要人工登录时才显示浏览器窗口。
 - 弹窗绝不自动确认；默认取消，需要确认必须显式执行 `dialog accept`。
+- `eval` 是显式 JavaScript 逃生口，用于页面自定义处理器；登录/验证页面会被拦截，不能用来绕过人工登录。
 - 无遥测；除你打开的页面外不发起其他网络请求。
 
 ## 项目结构

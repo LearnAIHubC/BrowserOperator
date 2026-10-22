@@ -1245,6 +1245,28 @@ async function drainProbe(page) {
   }
 }
 
+async function evalAction(body) {
+  const page = getPage();
+  const manualAuth = await manualAuthHints(page);
+  if (manualAuth.required) {
+    throw fail(
+      "manual-auth-required",
+      "页面需要用户登录或完成验证；eval 不会绕过登录/验证，请先在可见浏览器完成。",
+      manualAuth,
+    );
+  }
+  const expression = String(body.expression || "").trim();
+  if (!expression) throw fail("bad-request", "eval 需要 expression");
+  const result = await page.evaluate((source) => (0, eval)(source), expression);
+  return {
+    ok: true,
+    action: "eval",
+    profile: currentProfile,
+    url: maskUrl(page.url()),
+    result,
+  };
+}
+
 async function clickAction(body) {
   const page = getPage();
   const selector = String(body.selector || "").trim();
@@ -1567,6 +1589,137 @@ async function openAction(body) {
 
 async function gotoAction(body) {
   return openAction({ ...body, snapshot: false });
+}
+
+async function dragAction(body) {
+  const page = getPage();
+  const manualAuth = await manualAuthHints(page);
+  if (manualAuth.required) {
+    throw fail(
+      "manual-auth-required",
+      "页面需要用户登录或完成验证；drag 不会绕过登录/验证，请先在可见浏览器完成。",
+      manualAuth,
+    );
+  }
+
+  const sourceSelector = String(body.sourceSelector || "").trim();
+  const targetSelector = String(body.targetSelector || "").trim();
+  if (!sourceSelector || !targetSelector) {
+    throw fail("bad-request", "drag 需要 source 和 target selector");
+  }
+
+  const frame = String(body.frame || "").trim();
+  const timeout = Number(body.timeout) || DEFAULT_TIMEOUT;
+  const force = Boolean(body.force);
+  const method = body.js ? "js" : String(body.method || "auto");
+  const useJs = method === "js";
+  if (!["auto", "dragTo", "mouse", "js"].includes(method)) {
+    throw fail("bad-request", `未知 drag method: ${method}；可选 auto|dragTo|mouse|js`);
+  }
+  if (useJs && !body.allowJs) {
+    throw fail("real-only", "js drag 需要显式传 --allow-js，或直接用 --method mouse");
+  }
+
+  const root = await getRoot(frame);
+  const sourceLocator = root.locator(sourceSelector);
+  const targetLocator = root.locator(targetSelector);
+  const sourceCount = await sourceLocator.count();
+  const targetCount = await targetLocator.count();
+  if (sourceCount === 0) throw fail("not-found", `source selector 没有匹配元素: ${sourceSelector}`);
+  if (targetCount === 0) throw fail("not-found", `target selector 没有匹配元素: ${targetSelector}`);
+
+  const sourcePicked = await pickVisibleLocator(sourceLocator, timeout, body.sourceNth);
+  const targetPicked = await pickVisibleLocator(targetLocator, timeout, body.targetNth);
+  const sourceInfo = await describeLocator(sourcePicked.locator);
+  const targetInfo = await describeLocator(targetPicked.locator);
+
+  const sourceBox = await sourcePicked.locator.boundingBox();
+  const targetBox = await targetPicked.locator.boundingBox();
+  if (!sourceBox || !targetBox) {
+    throw fail("hidden", "source 或 target 没有可拖拽的 bounding box", { source: sourceInfo, target: targetInfo });
+  }
+
+  const beforeUrl = page.url();
+  await installProbe(page);
+  const sx = sourceBox.x + sourceBox.width / 2;
+  const sy = sourceBox.y + sourceBox.height / 2;
+  const tx = targetBox.x + targetBox.width / 2;
+  const ty = targetBox.y + targetBox.height / 2;
+  const steps = Math.max(1, Math.min(60, Number(body.steps) || 12));
+  let usedMethod = method;
+  let dragError = null;
+  let effect = { urlChanged: false, mutations: 0, steps };
+
+  const readEffect = async () => {
+    const probe = frame ? { events: [], mutations: 0 } : await drainProbe(page);
+    const currentUrl = page.url();
+    effect = {
+      urlChanged: currentUrl !== beforeUrl,
+      mutations: probe.mutations || 0,
+      steps,
+    };
+    return effect;
+  };
+
+  try {
+    if (method === "auto" || method === "mouse") {
+      usedMethod = "mouse";
+      await page.mouse.move(sx, sy);
+      await page.mouse.down();
+      for (let i = 1; i <= steps; i += 1) {
+        const ratio = i / steps;
+        await page.mouse.move(sx + (tx - sx) * ratio, sy + (ty - sy) * ratio);
+        await sleep(10);
+      }
+      await page.mouse.up();
+      await sleep(250);
+      await readEffect();
+    }
+    if (method === "dragTo" || (method === "auto" && !effect.urlChanged && effect.mutations === 0)) {
+      usedMethod = "dragTo";
+      await sourcePicked.locator.dragTo(targetPicked.locator, { force, timeout: Math.min(timeout, 5000) });
+      await sleep(250);
+      await readEffect();
+    }
+    if (method === "js") {
+      usedMethod = "js-drag";
+      const sourceHandle = await sourcePicked.locator.elementHandle();
+      const targetHandle = await targetPicked.locator.elementHandle();
+      if (!sourceHandle || !targetHandle) {
+        throw new Error("无法取得 source/target element handle");
+      }
+      await page.evaluate(({ source, target }) => {
+        const dataTransfer = new DataTransfer();
+        const options = { bubbles: true, cancelable: true, dataTransfer };
+        source.dispatchEvent(new DragEvent("dragstart", options));
+        target.dispatchEvent(new DragEvent("dragenter", options));
+        target.dispatchEvent(new DragEvent("dragover", options));
+        target.dispatchEvent(new DragEvent("drop", options));
+        source.dispatchEvent(new DragEvent("dragend", options));
+      }, { source: sourceHandle, target: targetHandle });
+      await sleep(250);
+      await readEffect();
+    }
+  } catch (error) {
+    dragError = firstLine(error?.message || error);
+  }
+
+  const moved = effect.urlChanged || effect.mutations > 0;
+  return {
+    ok: !dragError,
+    action: "drag",
+    profile: currentProfile,
+    method: usedMethod,
+    trusted: usedMethod !== "js-drag",
+    source: sourceInfo,
+    target: targetInfo,
+    effect,
+    ...(dragError ? { error: { code: "drag-failed", message: dragError } } : {}),
+    ...(!moved
+      ? { warning: "拖拽动作已执行，但没有观察到 URL 或 DOM 变化；请检查 source/target、drop 位置，必要时改用 --method dragTo 或 --method js --allow-js。" }
+      : {}),
+    url: maskUrl(page.url()),
+  };
 }
 
 async function fillAction(body) {
@@ -1993,6 +2146,8 @@ async function runDaemon(flags) {
           case "/goto": result = await gotoAction(body); break;
           case "/snapshot": result = await snapshotAction(body); break;
           case "/click": result = await clickAction(body); break;
+          case "/eval": result = await evalAction(body); break;
+          case "/drag": result = await dragAction(body); break;
           case "/fill": result = await fillAction(body); break;
           case "/press": result = await pressAction(body); break;
           case "/hover": result = await hoverAction(body); break;
@@ -2201,7 +2356,7 @@ async function main() {
 
   const command = positional.shift();
   if (!command) {
-    console.error("用法: browser <open|state|snapshot|query|click|fill|press|hover|select|wait|screenshot|switch|wait-login|console|network|debug|wait-verification|mode|close|experience|restore-session|fingerprint|stop|status|profiles> ...");
+    console.error("用法: browser <open|state|snapshot|query|click|eval|drag|fill|press|hover|select|wait|screenshot|switch|wait-login|console|network|debug|wait-verification|mode|close|experience|restore-session|fingerprint|stop|status|profiles> ...");
     process.exit(2);
   }
 
@@ -2213,7 +2368,16 @@ async function main() {
     else if (sub === "path") result = experiencePathAction(value);
     else if (sub === "show") result = experienceShowAction(value);
     else if (sub === "validate") result = experienceValidateAction(value);
-    else result = { ok: false, action: "experience", error: { code: "unknown-command", message: "用法: experience <list|path|show|validate> <domain>" } };
+    else if (sub === "current") {
+      const profile = String(flags.profile || DEFAULT_PROFILE);
+      const info = await ensureDaemon(profile, flags);
+      const state = await requestDaemon(info, "/state");
+      if (!state.url) throw new Error("当前没有页面 URL，无法解析 experience domain");
+      const domain = new URL(state.url).hostname;
+      if (!domain) throw new Error("当前页面没有 hostname（例如 file://），请直接 experience show <domain>");
+      result = { ...experienceShowAction(domain), resolvedFrom: maskUrl(state.url) };
+    }
+    else result = { ok: false, action: "experience", error: { code: "unknown-command", message: "用法: experience <list|path|show|validate|current> [domain]" } };
     print(result);
     if (result.ok === false) process.exit(1);
     return;
@@ -2355,6 +2519,33 @@ async function main() {
         maxChars: numberFlag(flags["max-chars"], DEFAULT_SNAPSHOT_CHARS),
       });
       break;
+    case "eval": {
+      const expression = positional.join(" ").trim();
+      if (!expression) throw new Error("eval 需要 expression");
+      result = await requestDaemon(info, "/eval", { expression });
+      break;
+    }
+    case "drag": {
+      const sourceSelector = positional[0];
+      const targetSelector = positional[1];
+      if (!sourceSelector || !targetSelector) throw new Error("drag 需要 source selector 和 target selector");
+      const jsDrag = Boolean(flags.js) || flags.method === "js";
+      result = await requestDaemon(info, "/drag", {
+        sourceSelector,
+        targetSelector,
+        frame: flags.frame || "",
+        timeout,
+        sourceNth: flags.nth !== undefined ? Math.max(0, numberFlag(flags.nth, 1) - 1) : undefined,
+        targetNth: flags["target-nth"] !== undefined ? Math.max(0, numberFlag(flags["target-nth"], 1) - 1) : undefined,
+        steps: numberFlag(flags.steps, 12),
+        method: flags.method || "auto",
+        force: Boolean(flags.force),
+        js: Boolean(flags.js),
+        allowJs: Boolean(flags["allow-js"]),
+        realOnly: !jsDrag,
+      });
+      break;
+    }
     case "click": {
       const selector = positional[0];
       if (!selector) throw new Error("click 需要 selector");

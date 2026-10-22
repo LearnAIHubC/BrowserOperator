@@ -33,6 +33,7 @@ Use this skill for **all** browser click/automation work. Do not write one-off P
 
 - `found:true`：先按 `content` 里的“快速路径/选择器/陷阱”执行，不要从头探索。
 - `found:false`：正常探索；成功后必须写经验。
+- 如果 `open` 后发生重定向（例如 127.0.0.1 → localhost、http → https、裸域 → www），用 `experience current` 按最终 `state.url` 的 host 再查一次；localhost/127.0.0.1 建议两个都查。
 - 经验过期或页面改版：更新文件，并在“验证记录”里注明。
 
 **探索成功后必须写/更新经验**（用 `write` 工具写文件，不要只留在对话里）：
@@ -47,7 +48,7 @@ Use this skill for **all** browser click/automation work. Do not write one-off P
 
 **任务收尾检查（强制，给最终答复前）**：
 
-1. 再执行一次 `"$BROWSER" experience show <domain>`。
+1. 再执行一次 `"$BROWSER" experience show <domain>`；如果本次页面发生过重定向，用 `"$BROWSER" experience current` 以最终 host 复查。
 2. 对照本次操作，确认是否出现新的入口 URL、选择器、结果读取方式、失败兜底或陷阱。
 3. 有新增/变化：更新经验文件，在“验证记录”追加一行，再执行 `experience validate <domain>`。
 4. 没有新增/变化：也要在“验证记录”追加一行简短记录（日期、任务、结果、备注“无新增”），证明本次已检查，避免下次重复探索。
@@ -148,6 +149,8 @@ A profile fingerprint is rebuilt automatically if the same profile is opened on 
 | `snapshot [--mode interactive\|text\|full\|forms] [--selector CSS] [--frame CSS]` | Page structure with suggested selectors |
 | `query <selector> [--limit N] [--html] [--all-attrs] [--frame CSS]` | Read matched DOM nodes (text/attrs/rect), including non-interactive divs |
 | `click <selector> [--nth N] [--wait-for CSS] [--wait-nav] [--frame CSS] [--timeout ms]` | Real mouse click + effect verification |
+| `drag <source> <target> [--nth N] [--target-nth N] [--steps N] [--method auto\|dragTo\|mouse\|js]` | Real drag/drop; auto tries stepped mouse then `dragTo`; `js` needs `--allow-js` |
+| `eval <expression>` | Explicit JS escape hatch for page-specific handlers; never bypasses login/verification |
 | `fill <selector> <value> [--type] [--append] [--frame CSS]` | Fill input; `--type` types with keyboard events |
 | `press <key>` | Keyboard key (e.g. `Enter`, `Escape`, `Tab`) |
 | `hover <selector> [--wait ms]` | Real mouse hover; use before clicking hover-only menus |
@@ -168,6 +171,7 @@ A profile fingerprint is rebuilt automatically if the same profile is opened on 
 | `experience list` | List saved site experiences |
 | `experience path <domain>` | Print the fixed experience file path |
 | `experience show <domain>` | Read a saved experience before exploring |
+| `experience current [--profile name]` | Resolve the active page URL and read that host's experience |
 | `experience validate <domain>` | Validate frontmatter and required sections |
 
 All commands return JSON. `ok:false` means the action failed; inspect `error.code`, `error.message`, `error.diagnosis`, and the automatic `error.screenshot` / `error.recentConsole` / `error.recentNetwork` attachments.
@@ -201,6 +205,20 @@ All commands return JSON. `ok:false` means the action failed; inspect `error.cod
 - For iframes: pass `--frame "#iframe-id"` to `click`, `snapshot`, `fill`, etc. Playwright resolves the frame internally.
 - For links/buttons that open a new tab: the daemon switches the active page automatically and returns `effect.newPage:true`; use `switch` to go back.
 
+## Drag / complex widgets
+
+Use `drag` for drag-and-drop lists, sortable tables, kanban boards, and upload drop zones:
+
+```bash
+"$BROWSER" drag "#source .item" "#target" --nth 1 --target-nth 1 --profile mysite
+```
+
+- Default `--method auto` performs a stepped real-mouse drag first, then falls back to Playwright `dragTo` if no URL/DOM change is observed.
+- SortableJS / jQuery UI / pointer-based lists usually work with the mouse path; HTML5 native drag can use `--method js --allow-js` as an explicit fallback.
+- If the source/target has hidden duplicates, use `--nth` / `--target-nth`; the command picks visible matches and returns `source`/`target` boxes.
+- A `warning` means the drag ran but no URL/DOM change was observed. Check source/target, drop position, or the component's own JS state; don't assume success from the mouse action alone.
+- For JS-managed date/time pickers, don't trust `fill` alone: click the field, wait for the visible calendar, then click the target day/cell. Prefer `wait <selector>` over fixed sleeps.
+- `eval` is an explicit escape hatch for page-specific handlers when real input is impossible. It must not be used to bypass login, verification, or CAPTCHA, and its result is `trusted:false`.
 
 ## 通用任务模式（写经验时套用）
 
@@ -209,6 +227,8 @@ All commands return JSON. `ok:false` means the action failed; inspect `error.cod
 | 搜索 | 结果页直达 URL 模板、搜索框/提交按钮、结果条目选择器、`--nth` 从 1 开始的规则、广告/重复节点；序号以 `items` 的可见顺序为准，`count` 可能更大 |
 | 列表 → 详情 | 列表卡片选择器、标题链接选择器、点击是否新标签页、详情标题/正文选择器、空页面兜底；详情页不要复用列表选择器 |
 | 表单提交 | 字段选择器/标签、填写方式（fill/type/select）、提交按钮、成功/失败判定选择器；登录/验证永远人工 |
+| 拖拽/排序 | source/target 选择器、`--nth`/`--target-nth`、`--method`、drop 位置、成功后的 DOM/URL 变化 |
+| 复杂组件 | datepicker/弹层/富文本/级联选择；先 `wait` 可见容器，再点可见项，不要只 `fill` |
 | 文章阅读 | 标题来源（`state.title` / 可见 h1）、正文容器、摘要截取方式、canonical 干净 URL、分页/懒加载/视频噪音 |
 | 多标签/iframe | 新标签页切换规则、iframe 选择器、`--frame` 用法 |
 | 弹窗/确认 | 默认 `dismiss`（取消）；需要确认时先 `dialog accept`；prompt 用 `--text`；click 返回 `dialogs` 作为证据 |

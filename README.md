@@ -10,7 +10,7 @@ Read this in Chinese: [README_CN.md](README_CN.md)
 - One persistent Chrome profile per site; cookies and `localStorage` survive across commands and sessions.
 - Headless by default, with automatic escalation to a visible window when a login or verification is required.
 - Manual-auth guard: the agent never types credentials, clicks login buttons, or solves CAPTCHAs.
-- Snapshot, query, click, fill, select, hover, press, wait, switch, and screenshot primitives.
+- Snapshot, query, click, drag, fill, select, hover, press, wait, switch, and screenshot primitives.
 - Console, network, and dialog capture, with a screenshot attached to every failed action.
 - Per-site experience files (`~/.dsh/browser-operator/experiences/<domain>.md`) written after a successful run.
 - `restore-session on` keeps session cookies (for example a Tomcat `JSESSIONID`) across browser restarts.
@@ -79,7 +79,7 @@ Login and verification are **always manual**. The agent opens the page, detects 
 "$BROWSER" wait-login --profile intranet --timeout 300000
 ```
 
-While a login or challenge is showing, write actions (`click`, `fill`, `press`, `select`) are blocked by the CLI. Read-only commands (`snapshot`, `query`, `console`, `network`, `screenshot`, `debug`) still work.
+While a login or challenge is showing, write actions (`click`, `drag`, `eval`, `fill`, `press`, `select`) are blocked by the CLI. Read-only commands (`snapshot`, `query`, `console`, `network`, `screenshot`, `debug`) still work.
 
 Session cookies have no `Expires` attribute, so Chrome normally does not reload them after a restart. Enable session restore for a profile when you want a mode switch or browser restart to keep the login:
 
@@ -95,6 +95,12 @@ Before exploring a site, read its saved experience:
 
 ```bash
 "$BROWSER" experience show example.com
+```
+
+If `open` redirects to a different host, use `experience current` to resolve the final page host and read that experience instead:
+
+```bash
+"$BROWSER" experience current --profile example
 ```
 
 After a successful exploration, write `~/.dsh/browser-operator/experiences/<domain>.md` using `references/experience-template.md`, then validate it:
@@ -136,6 +142,8 @@ Override via `settings.json`: `fingerprint.webgl` (`auto` by default, `spoof`, `
 | `snapshot [--mode interactive\|text\|full\|forms] [--selector CSS]` | Page structure with suggested selectors |
 | `query <selector> [--limit N] [--html] [--all-attrs]` | Read matched DOM nodes, including non-interactive elements |
 | `click <selector> [--nth N] [--wait-for CSS] [--wait-nav]` | Real mouse click plus effect verification |
+| `drag <source> <target> [--nth N] [--target-nth N] [--steps N] [--method auto\|dragTo\|mouse\|js]` | Real drag/drop; auto tries stepped mouse then `dragTo`; `js` needs `--allow-js` |
+| `eval <expression>` | Explicit JS escape hatch for page-specific handlers; never bypasses login/verification |
 | `fill <selector> <value> [--type] [--append]` | Fill an input; `--type` sends real keyboard events |
 | `press <key>` | Send a keyboard key |
 | `hover <selector>` | Real mouse hover |
@@ -152,7 +160,7 @@ Override via `settings.json`: `fingerprint.webgl` (`auto` by default, `spoof`, `
 | `console` / `network` / `debug` | Diagnostics: logs, requests, screenshot, recent dialogs |
 | `close` / `stop` / `status` | Tab control and daemon lifecycle |
 | `profiles` | List known profiles without secrets |
-| `experience list\|path\|show\|validate` | Experience memory operations |
+| `experience list\|path\|show\|validate\|current` | Experience memory operations; `current` resolves the active page host |
 
 ## Safety Model
 
@@ -161,6 +169,7 @@ Override via `settings.json`: `fingerprint.webgl` (`auto` by default, `spoof`, `
 - Profiles, screenshots, and experience files stay under `~/.dsh/browser-operator/` and are never committed to this repository.
 - The default mode is headless; the browser becomes visible only when the site requires manual authentication.
 - Dialogs are never auto-confirmed. The default is dismiss/cancel; confirmation requires an explicit `dialog accept`.
+- `eval` is an explicit JavaScript escape hatch for page-specific handlers; it is blocked on login/verification pages and must not be used to bypass manual auth.
 - No telemetry and no network calls other than the pages you open.
 
 ## Project Layout
