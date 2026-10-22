@@ -4,6 +4,9 @@ domain: <canonical domain, no www.>
 updated: <YYYY-MM-DD>
 confidence: high | medium | low
 verified_by: browser-operator
+app: <stable app key across dev/sit/uat/prod; optional>
+environment: <local|dev|sit|test|stage|uat|prod|other; optional>
+aliases: [<other domains for the same app>]
 tags: [<tag1>, <tag2>]
 ---
 
@@ -17,6 +20,12 @@ tags: [<tag1>, <tag2>]
 4. `state` + `snapshot --mode text` 读取详情的标题和正文
 
 > 目标：让新会话不看页面也能直接知道入口、选择器、索引规则和读取方式。
+
+## 跨环境差异
+
+- 同一应用的其他环境（dev/sit/uat/prod）经验：`experience related <domain>`；结构可复用，URL/账号/机构代号/OID 必须按环境重新确认。
+- 入口 URL 模板中标注环境变量：`https://<env-host>/<path>`。
+- 只在当前环境验证过的选择器/数据值，注明“未跨环境验证”。
 
 ## 选择器
 

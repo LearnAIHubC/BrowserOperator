@@ -111,6 +111,16 @@ After a successful exploration, write `~/.dsh/browser-operator/experiences/<doma
 
 A good experience file records the entry URL, selectors, result-ordering rules, traps, and a verification log so the next session can finish the same task in a few commands.
 
+For apps deployed to multiple environments, add optional frontmatter:
+
+```yaml
+app: my-admin              # stable across dev/sit/uat/prod
+environment: uat
+aliases: [my-admin.example.com, 127.0.0.1]
+```
+
+`experience show` and `experience current` return a `related` list of same-app, alias, or normalized-domain experiences (dev/sit/uat/prod). `experience related <domain>` lists them explicitly. Reuse structure only; re-check environment-specific URLs, accounts, institute IDs, and object IDs.
+
 Before giving the final answer, run `experience show <domain>` again. If the task added or changed anything, update the file and append a verification row; if nothing changed, still append a short "no new findings" row. Do not finish the task before this close-out check.
 
 ## Fingerprint
@@ -160,7 +170,7 @@ Override via `settings.json`: `fingerprint.webgl` (`auto` by default, `spoof`, `
 | `console` / `network` / `debug` | Diagnostics: logs, requests, screenshot, recent dialogs |
 | `close` / `stop` / `status` | Tab control and daemon lifecycle |
 | `profiles` | List known profiles without secrets |
-| `experience list\|path\|show\|validate\|current` | Experience memory operations; `current` resolves the active page host |
+| `experience list\|path\|show\|related\|validate\|current` | Experience memory operations; `related` finds same-app environments, `current` resolves the active page host |
 
 ## Safety Model
 

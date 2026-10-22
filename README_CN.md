@@ -111,6 +111,16 @@ Session cookie 没有 `Expires` 属性，Chrome 默认在重启后不会重新�
 
 一份好的经验文件应包含：入口 URL、搜索/结果/详情选择器、结果顺序规则、站点陷阱和验证记录，让下一个会话用少量命令完成同类任务。
 
+同一应用有 dev/sit/uat/prod 多个环境时，建议加可选 frontmatter：
+
+```yaml
+app: my-admin              # 跨环境稳定的应用键
+environment: uat
+aliases: [my-admin.example.com, 127.0.0.1]
+```
+
+`experience show` / `experience current` 会返回 `related`，列出同 `app`、别名或去掉环境词后同域的经验；`experience related <domain>` 可显式查询。只复用结构，URL、账号、机构代号、OID 等环境值必须重新确认。
+
 给最终答复前必须再执行一次 `experience show <domain>`：有新增或变化就更新经验并追加验证记录；没有变化也要补一行“无新增”。未完成这个收尾检查，不得结束任务。
 
 ## 浏览器指纹
@@ -160,7 +170,7 @@ Session cookie 没有 `Expires` 属性，Chrome 默认在重启后不会重新�
 | `console` / `network` / `debug` | 诊断：日志、请求、截图、最近弹窗 |
 | `close` / `stop` / `status` | 标签页与 daemon 生命周期 |
 | `profiles` | 列出已知 Profile（不含敏感信息） |
-| `experience list\|path\|show\|validate\|current` | 站点经验操作；`current` 解析当前页面 host |
+| `experience list\|path\|show\|related\|validate\|current` | 站点经验操作；`related` 查找同应用的其他环境，`current` 解析当前页面 host |
 
 ## 安全模型
 

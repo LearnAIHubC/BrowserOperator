@@ -32,7 +32,8 @@ Use this skill for **all** browser click/automation work. Do not write one-off P
 ```
 
 - `found:true`：先按 `content` 里的“快速路径/选择器/陷阱”执行，不要从头探索。
-- `found:false`：正常探索；成功后必须写经验。
+- `found:false`：先看返回的 `related`。如果有同 `app` 或同域归一化的其他环境经验（dev/sit/uat/prod），先读最接近的环境并只复用结构，URL、账号、机构代号、数据对象 OID 等环境值必须重新确认；没有 `related` 才从头探索。
+- `related` 里的 `match` 是 `app`（同应用）、`alias`（别名）或 `normalized-domain`（去掉 dev/sit/uat/prod 等环境词后同域）。
 - 如果 `open` 后发生重定向（例如 127.0.0.1 → localhost、http → https、裸域 → www），用 `experience current` 按最终 `state.url` 的 host 再查一次；localhost/127.0.0.1 建议两个都查。
 - 经验过期或页面改版：更新文件，并在“验证记录”里注明。
 
@@ -41,10 +42,15 @@ Use this skill for **all** browser click/automation work. Do not write one-off P
 - 先读模板：`references/experience-template.md`
 - 写入固定路径：`~/.dsh/browser-operator/experiences/<domain>.md`
 - 必须包含 YAML frontmatter：`site`、`domain`、`updated`、`confidence`
+- 同一应用有多个环境/域名时，建议加 `app`、`environment`、`aliases`：
+  - `app`：跨环境稳定的应用键（如 `my-admin`），不要带环境名
+  - `environment`：`local|dev|sit|test|stage|uat|prod|other`
+  - `aliases`：同应用的其他域名（含 `127.0.0.1` 这类别名）
 - 必须包含章节：`## 快速路径`、`## 选择器`、`## 结果读取`、`## 陷阱`、`## 空页面/异常兜底`、`## 验证记录`
 - 写“下一个会话能直接照做”的信息：入口 URL 模板、搜索框/按钮选择器、结果条目选择器、按第 N 个结果点击的规则、详情读取方式、广告/懒加载/新标签页等陷阱。
 - 不写 cookies、token、密码、手机号、完整个人数据；只写站点结构和选择器。
 - 写完用 `"$BROWSER" experience validate <domain>` 校验格式。
+- 查询同应用其他环境：`"$BROWSER" experience related <domain>`；`experience show` / `experience current` 也会返回 `related` 列表。
 
 **任务收尾检查（强制，给最终答复前）**：
 
@@ -170,7 +176,8 @@ A profile fingerprint is rebuilt automatically if the same profile is opened on 
 | `profiles` | List known profiles and their last URL/title (no secrets) |
 | `experience list` | List saved site experiences |
 | `experience path <domain>` | Print the fixed experience file path |
-| `experience show <domain>` | Read a saved experience before exploring |
+| `experience show <domain>` | Read a saved experience; also returns `related` environments |
+| `experience related <domain>` | List same-app / alias / normalized-domain experiences without loading full content |
 | `experience current [--profile name]` | Resolve the active page URL and read that host's experience |
 | `experience validate <domain>` | Validate frontmatter and required sections |
 

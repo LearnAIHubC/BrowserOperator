@@ -1971,6 +1971,15 @@ function experiencePath(value) {
   return join(EXPERIENCES, `${normalizeDomain(value)}.md`);
 }
 
+function parseMetaList(value) {
+  let raw = String(value || "").trim();
+  if (raw.startsWith("[") && raw.endsWith("]")) raw = raw.slice(1, -1);
+  return raw
+    .split(",")
+    .map((item) => item.trim().replace(/^["']|["']$/g, ""))
+    .filter(Boolean);
+}
+
 function parseExperienceMeta(text) {
   const meta = {};
   const match = String(text || "").match(/^---\r?\n([\s\S]*?)\r?\n---/);
@@ -1983,35 +1992,113 @@ function parseExperienceMeta(text) {
     if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
       value = value.slice(1, -1);
     }
-    meta[key] = value;
+    meta[key] = key === "aliases" ? parseMetaList(value) : value;
   }
   return meta;
 }
 
-function experienceListAction() {
+const EXPERIENCE_ENV_ORDER = ["local", "dev", "sit", "test", "stage", "uat", "prod", "other"];
+const EXPERIENCE_ENV_LABEL = /^(?:dev|development|sit|uat|test|testing|stage|staging|qa|prod|production|local|demo|sandbox)\d*$/i;
+
+function domainKey(value) {
+  let host;
+  try {
+    host = normalizeDomain(value);
+  } catch {
+    return "";
+  }
+  const envToken = "(?:dev|development|sit|uat|test|testing|stage|staging|qa|prod|production|local|demo|sandbox)\\d*";
+  return host
+    .split(".")
+    .map((label) => {
+      if (!label || EXPERIENCE_ENV_LABEL.test(label)) return "";
+      let cleaned = label.replace(new RegExp(`(^|[-_])${envToken}(?=[-_]|$)`, "ig"), "$1");
+      cleaned = cleaned.replace(/[-_]{2,}/g, "-").replace(/^[-_]+|[-_]+$/g, "");
+      return cleaned;
+    })
+    .filter(Boolean)
+    .join(".");
+}
+
+function safeNormalizeDomain(value) {
+  try {
+    return normalizeDomain(value);
+  } catch {
+    return "";
+  }
+}
+
+function experienceEntries() {
   ensureHome();
   const experiences = [];
   for (const entry of readdirSync(EXPERIENCES, { withFileTypes: true })) {
     if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
     const path = join(EXPERIENCES, entry.name);
-    const text = readFileSync(path, "utf8");
-    const meta = parseExperienceMeta(text);
+    const meta = parseExperienceMeta(readFileSync(path, "utf8"));
+    const aliases = Array.isArray(meta.aliases) ? meta.aliases.map(safeNormalizeDomain).filter(Boolean) : [];
     experiences.push({
-      domain: meta.domain || entry.name.replace(/\.md$/, ""),
+      domain: safeNormalizeDomain(meta.domain) || entry.name.replace(/\.md$/, ""),
       site: meta.site || "",
       updated: meta.updated || "",
       confidence: meta.confidence || "",
+      app: meta.app || "",
+      environment: meta.environment || "",
+      aliases,
+      meta,
       path,
     });
   }
-  experiences.sort((a, b) => String(b.updated).localeCompare(String(a.updated)));
+  return experiences;
+}
+
+function relatedExperiences(domain, experiences) {
+  const primary = experiences.find((entry) => entry.domain === domain);
+  const app = String(primary?.app || "").trim().toLowerCase();
+  const primaryAliases = new Set([...(primary?.aliases || []), domain]);
+  const key = domainKey(domain);
+  return experiences
+    .filter((entry) => entry.domain !== domain)
+    .map((entry) => {
+      let match = "";
+      if (app && String(entry.app || "").trim().toLowerCase() === app) match = "app";
+      else if (primaryAliases.has(entry.domain) || entry.aliases.includes(domain)) match = "alias";
+      else if (key && domainKey(entry.domain) === key) match = "normalized-domain";
+      if (!match) return null;
+      return {
+        domain: entry.domain,
+        site: entry.site,
+        updated: entry.updated,
+        confidence: entry.confidence,
+        app: entry.app,
+        environment: entry.environment,
+        match,
+        path: entry.path,
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => {
+      const ai = EXPERIENCE_ENV_ORDER.indexOf(String(a.environment).toLowerCase());
+      const bi = EXPERIENCE_ENV_ORDER.indexOf(String(b.environment).toLowerCase());
+      const ar = ai < 0 ? EXPERIENCE_ENV_ORDER.length : ai;
+      const br = bi < 0 ? EXPERIENCE_ENV_ORDER.length : bi;
+      return ar - br || String(b.updated).localeCompare(String(a.updated));
+    });
+}
+
+function experienceListAction() {
+  const experiences = experienceEntries()
+    .map(({ meta, aliases, ...entry }) => entry)
+    .sort((a, b) => String(b.updated).localeCompare(String(a.updated)));
   return { ok: true, action: "experience-list", directory: EXPERIENCES, experiences };
 }
 
 function experienceShowAction(value) {
-  const path = experiencePath(value);
+  const domain = normalizeDomain(value);
+  const path = experiencePath(domain);
+  const experiences = experienceEntries();
+  const related = relatedExperiences(domain, experiences);
   if (!existsSync(path)) {
-    return { ok: true, action: "experience-show", found: false, path, domain: normalizeDomain(value) };
+    return { ok: true, action: "experience-show", found: false, path, domain, related };
   }
   const content = readFileSync(path, "utf8");
   return {
@@ -2019,9 +2106,25 @@ function experienceShowAction(value) {
     action: "experience-show",
     found: true,
     path,
-    domain: normalizeDomain(value),
+    domain,
     meta: parseExperienceMeta(content),
+    related,
     content,
+  };
+}
+
+function experienceRelatedAction(value) {
+  const domain = normalizeDomain(value);
+  const experiences = experienceEntries();
+  const primary = experiences.find((entry) => entry.domain === domain);
+  return {
+    ok: true,
+    action: "experience-related",
+    domain,
+    found: Boolean(primary),
+    app: primary?.app || "",
+    environment: primary?.environment || "",
+    related: relatedExperiences(domain, experiences),
   };
 }
 
@@ -2368,6 +2471,7 @@ async function main() {
     else if (sub === "path") result = experiencePathAction(value);
     else if (sub === "show") result = experienceShowAction(value);
     else if (sub === "validate") result = experienceValidateAction(value);
+    else if (sub === "related") result = experienceRelatedAction(value);
     else if (sub === "current") {
       const profile = String(flags.profile || DEFAULT_PROFILE);
       const info = await ensureDaemon(profile, flags);
@@ -2377,7 +2481,7 @@ async function main() {
       if (!domain) throw new Error("当前页面没有 hostname（例如 file://），请直接 experience show <domain>");
       result = { ...experienceShowAction(domain), resolvedFrom: maskUrl(state.url) };
     }
-    else result = { ok: false, action: "experience", error: { code: "unknown-command", message: "用法: experience <list|path|show|validate|current> [domain]" } };
+    else result = { ok: false, action: "experience", error: { code: "unknown-command", message: "用法: experience <list|path|show|related|validate|current> [domain]" } };
     print(result);
     if (result.ok === false) process.exit(1);
     return;
