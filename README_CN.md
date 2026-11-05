@@ -1,222 +1,74 @@
-# BrowserOperator
+<h1 align="center">BrowserOperator</h1>
 
-BrowserOperator 是一个用于持久化 Chrome 自动化的 Agent Skill。它内置一个 Node.js CLI，通过 CDP 发出真实的鼠标/键盘事件；每个站点使用独立的 Chrome Profile，登录状态可跨命令、跨会话保留；每次探索成功后会沉淀一份可复用的站点经验文件，后续会话不必重新摸索选择器。
+<p align="center"><strong>让你的 Agent 帮你操作浏览器。</strong></p>
 
-英文说明：[README.md](README.md)
+<p align="center">
+  <a href="README.md">English</a> ·
+  <a href="#快速开始">快速开始</a> ·
+  <a href="skills/browser-operator/references/usage_CN.md">使用指南</a>
+</p>
 
-## 功能特性
-
-- 真实鼠标点击：走 Playwright `locator.click()` + CDP，不使用 `el.click()` DOM 事件。
-- 一个站点一个持久化 Chrome Profile，cookie 与 `localStorage` 跨命令、跨会话保留。
-- 默认 headless；页面需要登录或人机验证时自动切到有头窗口。
-- 登录保护：Agent 绝不输入账号密码、不点登录按钮、不处理滑块/CAPTCHA。
-- 提供 snapshot、query、click、drag、fill、select、hover、press、wait、switch、screenshot 等原子操作。
-- 自动收集 console、network、dialog；操作失败时自动附带截图与最近请求。
-- 每个站点一份经验文件（`~/.dsh/browser-operator/experiences/<domain>.md`），探索成功后写入。
-- 每个域名一份验证日志（`~/.dsh/browser-operator/logs/<domain>/log.md`），一行一次（`- 日期 时间 | 任务 | ok|failed|partial | 备注`），用 `log add` 追加，经验文件不再堆记录。
-- 每个站点一份操作脚本（`~/.dsh/browser-operator/脚本/<domain>.md`）：同一任务做满 2 次后，第 3 次沉淀为带 `{{占位符}}` 的 CLI 步骤，`recipe run --var ...` 一键重放；失败时保留页面现场，交给 LLM 接管并修正脚本。
-- `restore-session on`：重启浏览器后仍能恢复 session cookie（例如 Tomcat 的 `JSESSIONID`）。
-- 原生弹窗默认 **dismiss（取消）**；显式 `dialog accept` 才确认，`dialog accept --text` 可填写 prompt；`click` / `open` / `debug` 返回 `dialogs` 证据。
-- 每个 Profile 一套固定指纹：headless 下也是普通 Chrome UA（无 `HeadlessChrome`），platform/vendor/WebGL 与宿主一致，Canvas/Audio 噪声稳定。
-
-## 环境要求
-
-- Node.js 18 及以上
-- Google Chrome（或通过 `CHROME_PATH` 指定）
-- npm
-- macOS、Linux 或 Windows
-
-## 安装到 Agent
-
-以 [DeepSeek Harness](https://github.com/deepseek-ai) 为例（Skill 目录为 `${DSH_HOME:-$HOME/.dsh}/skills`）：
-
-```bash
-npx --yes github:LearnAIHubC/BrowserOperator
-```
-
-安装完成后重启 Agent，即可使用 `browser-operator` skill。
-
-更新已安装版本：
-
-```bash
-npx --yes github:LearnAIHubC/BrowserOperator --force
-```
-
-安装器会把 skill 复制到 `${DSH_HOME:-$HOME/.dsh}/skills/browser-operator`，安装 Node.js 依赖，并在 `${DSH_HOME:-$HOME/.dsh}/bin/browser-operator` 创建启动器。把该 `bin` 目录加入 `PATH` 后可以直接运行 `browser-operator`；使用 `--dest` 安装时以安装器打印的启动器路径为准。
-
-手动安装：
-
-```bash
-git clone https://github.com/LearnAIHubC/BrowserOperator.git /tmp/BrowserOperator
-cp -R /tmp/BrowserOperator/skills/browser-operator "$HOME/.dsh/skills/browser-operator"
-npm install --prefix "$HOME/.dsh/skills/browser-operator/scripts"
-```
+BrowserOperator 是一个浏览器操作 Skill。安装后，你可以直接让 Agent 在 Chrome 中搜索信息、阅读页面、填写表单或保存截图。
 
 ## 快速开始
 
-```bash
-BROWSER="$HOME/.dsh/skills/browser-operator/bin/browser"
+### 安装 Skill
 
-# 用命名 Profile 打开站点（默认 headless）
-"$BROWSER" open "https://example.com" --profile example
+让你的 Agent 安装 [https://github.com/LearnAIHubC/BrowserOperator.git](https://github.com/LearnAIHubC/BrowserOperator.git)。
 
-# 查看可点击元素，并拿到可直接复制的选择器
-"$BROWSER" snapshot --mode interactive --profile example
+### 开始使用
 
-# 真实鼠标点击，并验证页面是否产生变化
-"$BROWSER" click "button:has-text(\"保存\")" --profile example --wait-for ".success-toast"
+对你的 Agent 说：
 
-# 截图
-"$BROWSER" screenshot --profile example --full-page
-```
+> 打开百度，搜索 xxx。
 
-每个 `--profile` 对应 `~/.dsh/browser-operator/profiles/<name>` 下的独立 Chrome Profile。建议一个站点固定一个 Profile，例如 `--profile github`、`--profile company-sso`。
+## 主要特点
 
-## 登录持久化
+### 保留登录状态
 
-登录和人机验证**始终由用户手动完成**。Agent 只负责打开页面、识别登录页、请用户在可见的 Chrome 中完成操作，然后轮询等待：
+为常用站点保存独立的浏览器资料。登录仍然有效时，下次访问可以接着使用，减少重复登录。
 
-```bash
-"$BROWSER" open "https://intranet.example.com" --profile intranet
-"$BROWSER" wait-login --profile intranet --timeout 300000
-```
+### 复用站点经验
 
-登录/验证进行中时，CLI 会拦截 `click`、`drag`、`eval`、`fill`、`press`、`select`；`snapshot`、`query`、`console`、`network`、`screenshot`、`debug` 仍然可用。
+Agent 可以记录已经验证的操作方法、页面入口和注意事项。再次处理同一站点时，有经验可参考，减少重复摸索。
 
-Session cookie 没有 `Expires` 属性，Chrome 默认在重启后不会重新加载。需要跨重启保留登录时，为 Profile 开启会话恢复：
+### 重放常用流程
 
-```bash
-"$BROWSER" restore-session on --profile intranet
-```
+Agent 可以把稳定的操作步骤整理成可复用流程。同类任务换个关键词或填写内容，就能按已有步骤再次执行。
 
-下次启动会用 `--restore-last-session` 拉起 Chrome；恢复出来的重复标签页会自动收敛为一个。该设置按 Profile 保存，并会停止一次 daemon，让下次 `open` 生效。
+### 出错后方便接手
 
-## 站点经验记忆
+流程执行失败时会停止后续步骤，保留当前页面。你或 Agent 可以结合截图和运行记录，查看问题并继续处理。
 
-探索站点前先读经验：
+## 常见问题
 
-```bash
-"$BROWSER" experience show example.com
-```
+<details>
+<summary>需要自己写代码吗？</summary>
 
-如果 `open` 后发生重定向，用 `experience current` 按最终页面 host 读取经验：
+日常使用时，只需向 Agent 描述任务。BrowserOperator 提供浏览器操作能力，具体步骤由你的 Agent 安排。
 
-```bash
-"$BROWSER" experience current --profile example
-```
+</details>
 
-探索成功后，按 `references/experience-template.md` 写入 `~/.dsh/browser-operator/experiences/<domain>.md`，并校验格式：
+<details>
+<summary>登录和验证码怎么处理？</summary>
 
-```bash
-"$BROWSER" experience validate example.com
-```
+默认由你在浏览器窗口中完成登录，再由 Agent 继续任务。只有你明确要求代登录时，才允许 Agent 执行相关操作；滑块和验证码始终由你完成。
 
-一份好的经验文件应包含：入口 URL、搜索/结果/详情选择器、结果顺序规则、站点陷阱和验证记录，让下一个会话用少量命令完成同类任务。
+</details>
 
-同一应用有 dev/sit/uat/prod 多个环境时，建议加可选 frontmatter：
+<details>
+<summary>数据保存在什么地方？</summary>
 
-```yaml
-app: my-admin              # 跨环境稳定的应用键
-environment: uat
-aliases: [my-admin.example.com, 127.0.0.1]
-```
+浏览器资料、默认截图、站点经验和运行记录保存在本机。登录能否继续使用，还取决于网站的有效期和会话设置，详见[使用指南](skills/browser-operator/references/usage_CN.md)。
 
-`experience show` / `experience current` 会返回 `related`，列出同 `app`、别名或去掉环境词后同域的经验；`experience related <domain>` 可显式查询。只复用结构，URL、账号、机构代号、OID 等环境值必须重新确认。
+</details>
 
-给最终答复前必须再执行一次 `experience show <domain>`：有新增或变化就更新经验并追加验证记录；没有变化也要补一行“无新增”。未完成这个收尾检查，不得结束任务。
+## 进一步了解
 
-## 浏览器指纹
+- [使用指南](skills/browser-operator/references/usage_CN.md)：环境要求、手动安装、完整命令与配置。
+- [Skill 说明](skills/browser-operator/SKILL.md)：Agent 使用浏览器时的流程与规则。
+- [站点经验模板](skills/browser-operator/references/experience-template.md) · [操作流程模板](skills/browser-operator/references/recipe-template.md)：保存可复用的操作方法。
 
-每个 Profile 首次启动时生成一套指纹，保存在 `~/.dsh/browser-operator/profiles/<name>/settings.json`，之后跨刷新、重启、headless/headed 切换都不变。
+---
 
-- **UA/UA-CH**：有头和无头注入**完全相同的一套身份**（真实 Chrome 大版本 + 宿主 architecture/platformVersion/bitness），切换模式指纹不变；默认全程无头。
-- **navigator**：默认不注入，保持原生值（platform/vendor/languages 本身就和系统一致）；JS 覆盖会留下痕迹，改为可选。
-- **WebGL**：默认使用真实 GPU（如 Apple M1 Pro）；`"spoof"` 可固定渲染器，`"off"` 可关闭 WebGL。
-- **Canvas/Audio**：用 Profile 内固定 seed 加噪，指纹哈希跨会话稳定。
-- **locale/timezone**：取系统设置（macOS 的 `zh-Hans_US` 归一化为 `zh-CN`）。
-- **webdriver**：由 `--disable-blink-features=AutomationControlled` 保持 `false`。
-- **DevTools 误报**：默认把 `console.table` 延迟执行（`devtoolsFix`），因为 CDP 序列化 console 参数会让基于耗时的 DevTools 检测器误判为打开了开发者工具。
-
-```bash
-"$BROWSER" fingerprint --profile example          # 查看
-"$BROWSER" fingerprint --profile example --reset  # 重新生成（会停 daemon）
-```
-
-可在 `settings.json` 覆盖：`fingerprint.webgl`（默认 `auto`，可选 `spoof`/`off`）、`fingerprint.navigator`（默认 `false`）、`fingerprint.canvasNoise`、`fingerprint.audioNoise`、`fingerprint.devtoolsFix`（默认 `true`）、`userAgent`、`locale`、`timezone`。
-
-## 常用命令
-
-| 命令 | 用途 |
-|---|---|
-| `open <url> [--profile name] [--headed\|--headless] [--no-auto-headed] [--snapshot]` | 打开 URL；不传模式参数时保持当前模式 |
-| `goto <url>` | 同 `open`，不返回 snapshot |
-| `state` | 当前 URL、标题、标签页、登录/验证提示 |
-| `snapshot [--mode interactive\|text\|full\|forms] [--selector CSS]` | 页面结构 + 推荐选择器 |
-| `query <selector> [--limit N] [--html] [--all-attrs]` | 读取 DOM 节点（含非交互元素） |
-| `click <selector> [--nth N] [--wait-for CSS] [--wait-nav]` | 真实鼠标点击并验证效果 |
-| `drag <source> <target> [--nth N] [--target-nth N] [--steps N] [--method auto\|dragTo\|mouse\|js]` | 真实拖拽；auto 先真实鼠标再 dragTo；`js` 需 `--allow-js` |
-| `eval <expression>` | 显式 JS 逃生口，用于页面自定义处理器；不绕过登录/验证 |
-| `fill <selector> <value> [--type] [--append]` | 填写输入框；`--type` 逐字输入 |
-| `press <key>` | 发送按键 |
-| `hover <selector>` | 真实鼠标悬停 |
-| `select <selector> <value> [--label]` | 选择下拉项 |
-| `wait <selector>` / `wait --url <pattern>` | 等待元素或 URL |
-| `screenshot [path] [--full-page]` | 保存截图 |
-| `switch --index N` / `switch --url includes` | 切换活动标签页 |
-| `mode headed` / `mode headless` | 切换模式（会重启 Chrome） |
-| `dialog accept [--text value]` / `dialog dismiss` / `dialog status` | 弹窗策略；默认取消 |
-| `restore-session on\|off` | 跨浏览器重启保留 session cookie |
-| `fingerprint [--reset]` | 查看 Profile 固定指纹；`--reset` 重新生成 |
-| `wait-login [--timeout ms]` | 等待登录页消失 |
-| `wait-verification [--timeout ms]` | 等待滑块/验证页消失 |
-| `console` / `network` / `debug` | 诊断：日志、请求、截图、最近弹窗 |
-| `close` / `stop` / `status` | 标签页与 daemon 生命周期 |
-| `profiles` | 列出已知 Profile（不含敏感信息） |
-| `experience list\|path\|show\|related\|validate\|current` | 站点经验操作；`related` 查找同应用的其他环境，`current` 解析当前页面 host |
-
-## 安全模型
-
-- 账号密码只在用户可见的 Chrome 窗口中输入，CLI 不接收密码、OTP 或 cookie 值。
-- CLI 不打印、不复制、不上传 `chrome-profile/`、cookie、`daemon.json` 或 daemon token。
-- Profile、截图、经验文件都保存在 `~/.dsh/browser-operator/` 下，不会进入本仓库。
-- 默认 headless；只有站点需要人工登录时才显示浏览器窗口。
-- 弹窗绝不自动确认；默认取消，需要确认必须显式执行 `dialog accept`。
-- `eval` 是显式 JavaScript 逃生口，用于页面自定义处理器；登录/验证页面会被拦截，不能用来绕过人工登录。
-- 无遥测；除你打开的页面外不发起其他网络请求。
-
-## 项目结构
-
-```text
-bin/install.mjs
-package.json
-skills/browser-operator/
-|-- SKILL.md
-|-- bin/browser
-|-- references/experience-template.md
-`-- scripts/
-    |-- browser.mjs
-    |-- package.json
-    `-- package-lock.json
-```
-
-## 校验
-
-```bash
-node --check skills/browser-operator/scripts/browser.mjs
-node --check bin/install.mjs
-"$HOME/.dsh/skills/browser-operator/bin/browser" experience validate example.com
-```
-
-## 打包预览
-
-```bash
-npm pack --dry-run
-```
-
-## 友情链接
-
-- [LINUX DO](https://linux.do/) - 新的理想型社区，技术爱好者的聚集地。
-
-## 许可证
-
-MIT License，详见 [LICENSE](LICENSE)。
+[MIT License](LICENSE)
