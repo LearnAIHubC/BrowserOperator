@@ -67,6 +67,5 @@ tags: [<tag1>, <tag2>]
 
 ## 验证记录
 
-| 日期 | 任务 | 结果 | 备注 |
-|---|---|---|---|
-| <YYYY-MM-DD> | <keyword / index / page> | <title + url> | <first run / reuse run> |
+日志已独立存放：`~/.dsh/browser-operator/logs/<domain>/log.md`。
+新记录用 `browser log add <domain> "<任务>" --result ok|failed|partial --note "..."` 追加（固定格式，一行一次），这里只保留指针，不再堆记录。

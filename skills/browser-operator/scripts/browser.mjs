@@ -38,6 +38,7 @@ const PROFILES = join(HOME, "profiles");
 const SHOTS = join(HOME, "screenshots");
 const EXPERIENCES = join(HOME, "experiences");
 const RECIPES = join(HOME, "脚本");
+const LOGS = join(HOME, "logs");
 const DEFAULT_PROFILE = "default";
 const DEFAULT_TIMEOUT = 15_000;
 const DEFAULT_SNAPSHOT_CHARS = 30_000;
@@ -2740,6 +2741,138 @@ async function recipeRunAction(domainInput, wanted, flags) {
   return output;
 }
 
+// ── verification logs (logs/<domain>/log.md) ────────────────────
+//
+// Verification notes used to pile up in each experience file. They now live
+// in one append-only log per domain. New lines have a fixed shape so the
+// agent and `log show` can read them without guessing:
+//   - YYYY-MM-DD HH:mm | task | ok|failed|partial | note
+
+const LOG_RESULTS = new Map([
+  ["ok", "ok"],
+  ["success", "ok"],
+  ["成功", "ok"],
+  ["failed", "failed"],
+  ["fail", "failed"],
+  ["failure", "failed"],
+  ["失败", "failed"],
+  ["partial", "partial"],
+  ["部分", "partial"],
+  ["部分成功", "partial"],
+]);
+const LOG_ENTRY = /^- (\d{4}-\d{2}-\d{2})(?: (\d{2}:\d{2}))? \| ([^|]*?) \| (ok|failed|partial)(?: \| (.*))?$/;
+
+function ensureLogsDir() {
+  ensureHome();
+  mkdirSync(LOGS, { recursive: true, mode: 0o700 });
+}
+
+function logPath(value) {
+  return join(LOGS, normalizeDomain(value), "log.md");
+}
+
+function logHeader(domain) {
+  return [
+    `# ${domain} 验证日志`,
+    "",
+    "> 固定格式（一行一次）：`- YYYY-MM-DD HH:mm | 任务 | 结果(ok|failed|partial) | 备注`",
+    '> 只追加，不改历史行；命令：`browser log add <domain> "<任务>" --result ok [--note "..."]`',
+    "> 历史记录从 `experiences/<domain>.md` 的「验证记录」迁入，原样保留。",
+    "",
+    "## 记录",
+    "",
+    "",
+  ].join("\n");
+}
+
+function logNow() {
+  const now = new Date();
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+}
+
+function parseLogEntries(text) {
+  const entries = [];
+  for (const line of String(text || "").split(/\r?\n/)) {
+    const match = line.match(LOG_ENTRY);
+    if (!match) continue;
+    entries.push({
+      at: match[2] ? `${match[1]} ${match[2]}` : match[1],
+      task: match[3].trim(),
+      result: match[4],
+      note: match[5] ? match[5].trim() : "",
+    });
+  }
+  return entries;
+}
+
+function logAddAction(domainInput, taskText, flags) {
+  const domain = normalizeDomain(domainInput);
+  const task = String(taskText || "").replace(/\s+/g, " ").trim();
+  if (!task) {
+    return {
+      ok: false,
+      action: "log-add",
+      domain,
+      error: { code: "bad-request", message: 'log add 需要任务描述: log add <domain> "<任务>" --result ok' },
+    };
+  }
+  const result = LOG_RESULTS.get(String(flags.result || "").toLowerCase());
+  if (!result) {
+    return { ok: false, action: "log-add", domain, error: { code: "bad-result", message: "--result 需要 ok、failed 或 partial" } };
+  }
+  const note = String(flags.note || "").replace(/\s+/g, " ").trim();
+  ensureLogsDir();
+  const dir = join(LOGS, domain);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const path = join(dir, "log.md");
+  if (!existsSync(path)) writeFileSync(path, logHeader(domain), { mode: 0o600 });
+  const at = logNow();
+  appendFileSync(path, `- ${at} | ${task} | ${result}${note ? ` | ${note}` : ""}\n`);
+  return { ok: true, action: "log-add", domain, path, entry: { at, task, result, note } };
+}
+
+function logShowAction(domainInput, flags) {
+  const domain = normalizeDomain(domainInput);
+  const path = join(LOGS, domain, "log.md");
+  if (!existsSync(path)) return { ok: true, action: "log-show", domain, path, found: false, count: 0, entries: [] };
+  const text = readFileSync(path, "utf8");
+  const entries = parseLogEntries(text);
+  const limit = Math.max(1, numberFlag(flags.limit, 20));
+  return {
+    ok: true,
+    action: "log-show",
+    domain,
+    path,
+    found: true,
+    count: entries.length,
+    entries: entries.slice(-limit),
+    history: /^## 历史记录/m.test(text),
+    bytes: text.length,
+  };
+}
+
+function logListAction() {
+  ensureLogsDir();
+  const logs = [];
+  for (const entry of readdirSync(LOGS, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const path = join(LOGS, entry.name, "log.md");
+    if (!existsSync(path)) continue;
+    const text = readFileSync(path, "utf8");
+    const entries = parseLogEntries(text);
+    logs.push({
+      domain: entry.name,
+      path,
+      count: entries.length,
+      history: /^## 历史记录/m.test(text),
+      last: entries.at(-1) || null,
+    });
+  }
+  logs.sort((a, b) => String(b.last?.at || "").localeCompare(String(a.last?.at || "")));
+  return { ok: true, action: "log-list", directory: LOGS, logs };
+}
+
 // ── daemon ───────────────────────────────────────────────────────
 
 let currentProfile = DEFAULT_PROFILE;
@@ -3061,7 +3194,7 @@ async function main() {
 
   const command = positional.shift();
   if (!command) {
-    console.error("用法: browser <open|state|snapshot|query|click|eval|drag|fill|press|hover|select|wait|screenshot|switch|wait-login|console|network|debug|wait-verification|mode|focus|close|experience|recipe|restore-session|fingerprint|stop|status|profiles> ...");
+    console.error("用法: browser <open|state|snapshot|query|click|eval|drag|fill|press|hover|select|wait|screenshot|switch|wait-login|console|network|debug|wait-verification|mode|focus|close|experience|recipe|log|restore-session|fingerprint|stop|status|profiles> ...");
     process.exit(2);
   }
 
@@ -3103,6 +3236,24 @@ async function main() {
         ok: false,
         action: "recipe",
         error: { code: "unknown-command", message: "用法: recipe <list|show|log|run> <domain> [task]" },
+      };
+    print(result);
+    if (result.ok === false) process.exit(1);
+    return;
+  }
+
+  if (command === "log") {
+    const sub = positional.shift();
+    const value = positional[0] || flags.domain || "";
+    let result;
+    if (sub === "list") result = logListAction();
+    else if (sub === "show") result = logShowAction(value, flags);
+    else if (sub === "add") result = logAddAction(value, positional.slice(1).join(" "), flags);
+    else
+      result = {
+        ok: false,
+        action: "log",
+        error: { code: "unknown-command", message: '用法: log <add|show|list> <domain> [任务]（add 需要 --result ok|failed|partial）' },
       };
     print(result);
     if (result.ok === false) process.exit(1);

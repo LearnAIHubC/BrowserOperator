@@ -72,13 +72,25 @@ Use this skill for **all** browser click/automation work. Do not write one-off P
 
 1. 再执行一次 `"$BROWSER" experience show <domain>`；如果本次页面发生过重定向，用 `"$BROWSER" experience current` 以最终 host 复查。
 2. 对照本次操作，确认是否出现新的入口 URL、选择器、结果读取方式、失败兜底或陷阱。
-3. 有新增/变化：更新经验文件，在“验证记录”追加一行，再执行 `experience validate <domain>`。
-4. 没有新增/变化：也要在“验证记录”追加一行简短记录（日期、任务、结果、备注“无新增”），证明本次已检查，避免下次重复探索。
+3. 有新增/变化：更新经验文件，再执行 `experience validate <domain>`。
+4. 无论有没有变化，都用日志命令记一条本次运行：`"$BROWSER" log add <domain> "<任务>" --result ok|failed|partial --note "<结果/备注>"`（无新增也记 `ok` + “无新增”，证明已检查）。
 5. 未完成以上检查，不得给最终答复。
 
 这一步是硬性收尾条件。经验文件的价值在于“下一次只看 md 就能照做”，不记录等于本次探索白做。
 
-**新会话验证标准**：不依赖旧对话，只读这份 md，就能在少量命令内完成同类任务。验证后再把结果补充到“验证记录”。
+**新会话验证标准**：不依赖旧对话，只读这份 md，就能在少量命令内完成同类任务。验证后再把结果记进日志。
+
+## 验证日志（logs/<domain>/log.md，固定格式）
+
+验证记录不再堆在经验文件里，按域名独立存放，一个域名一个文件夹：
+
+- **位置**：`~/.dsh/browser-operator/logs/<canonical-domain>/log.md`
+- **固定格式**（一行一次，只追加、不改历史行）：
+  `- YYYY-MM-DD HH:mm | 任务 | 结果(ok|failed|partial) | 备注`
+- **追加**：`"$BROWSER" log add <domain> "<任务>" --result ok|failed|partial --note "<备注>"`
+- **查看**：`"$BROWSER" log show <domain> [--limit N]`；全部域名：`"$BROWSER" log list`
+- 经验文件的 `## 验证记录` 只保留一行指针；迁移前的表格/条目原样保存在日志的 `## 历史记录（经验迁移 …）` 下。
+- 不要手工改格式；`log add` 会生成合法行，`log show` 只解析这个格式。
 
 ## 操作脚本（recipe：同一任务第 3 次开始录制）
 
@@ -245,6 +257,9 @@ A profile fingerprint is rebuilt automatically if the same profile is opened on 
 | `experience related <domain>` | List same-app / alias / normalized-domain experiences without loading full content |
 | `experience current [--profile name]` | Resolve the active page URL and read that host's experience |
 | `experience validate <domain>` | Validate frontmatter and required sections |
+| `log add <domain> "<任务>" --result ok\|failed\|partial [--note text]` | Append one fixed-format verification log line |
+| `log show <domain> [--limit N]` | Recent standardized log entries for a domain |
+| `log list` | Domains with logs, entry counts and last entry |
 | `recipe list [filter]` | List saved operation recipes, their task counters and whether steps exist |
 | `recipe show <domain> [task]` | Show a task's params, counter and steps |
 | `recipe log <domain> <task>` | Increment that task's `次数` and stamp `最近` |
