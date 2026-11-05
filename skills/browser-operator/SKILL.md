@@ -1,6 +1,6 @@
 ---
 name: browser-operator
-description: "Persistent Chrome automation for real mouse clicks: headless by default, with dynamic headed switching when the user must log in or complete verification. Manual-auth policy: by default the user performs login and verification in the visible browser; the agent types credentials or clicks login only when the user explicitly asks for it in the conversation, and then must pass --allow-auth. Sliders/CAPTCHA are never solved by the agent. Use for opening sites, reusing existing sessions, snapshots, clicks, hover, forms, iframes, screenshots, console/network debugging. Dialogs default to cancel; confirm explicitly. It reads a saved per-site experience before exploring and writes a reusable experience md after a successful run. Profiles keep cookies/localStorage. Triggers include 浏览器点击, 打开网站, 登录网站, 保存登录, 保持登录, 帮我登录, real click, browser automation."
+description: "Persistent Chrome automation for real mouse clicks: headless by default, with dynamic headed switching when the user must log in or complete verification. Manual-auth policy: by default the user performs login and verification in the visible browser; the agent types credentials or clicks login only when the user explicitly asks for it in the conversation, and then must pass --allow-auth. Sliders/CAPTCHA are never solved by the agent. Use for opening sites, reusing existing sessions, snapshots, clicks, hover, forms, iframes, screenshots, console/network debugging. Dialogs default to cancel; confirm explicitly. It reads a saved per-site experience before exploring and writes a reusable experience md after a successful run. It also keeps repeatable per-site task recipes under 脚本/ with {{placeholders}} and replays them with recipe run. Profiles keep cookies/localStorage. Triggers include 浏览器点击, 打开网站, 登录网站, 保存登录, 保持登录, 帮我登录, 操作脚本, 一键执行, real click, browser automation."
 ---
 
 # Browser Operator
@@ -79,6 +79,47 @@ Use this skill for **all** browser click/automation work. Do not write one-off P
 这一步是硬性收尾条件。经验文件的价值在于“下一次只看 md 就能照做”，不记录等于本次探索白做。
 
 **新会话验证标准**：不依赖旧对话，只读这份 md，就能在少量命令内完成同类任务。验证后再把结果补充到“验证记录”。
+
+## 操作脚本（recipe：同一任务第 3 次开始录制）
+
+经验记录“怎么做”，脚本记录“可以一键重放的那几步”。同一域名、同一任务做过 2 次（`次数: 2`），第 3 次仍稳定时，把它固化成脚本；之后优先 `recipe run`，失败再交回 LLM 手动接管并修正。
+
+**固定位置**：`~/.dsh/browser-operator/脚本/<canonical-domain>.md`（与 `experiences/` 同层级；去掉开头 `www.`，子域名保留）
+
+一个域名一个 Markdown 文件，frontmatter 与经验一致（`site`/`domain`/`app`/`environment`/`updated`，可选 `profile`）。每个任务一个 `##` 段落：
+
+````markdown
+## 搜索并读取结果
+- 次数: 3
+- 参数: query=搜索词
+- 最近: 2026-11-05
+
+```steps
+open https://example.com/ --profile example
+fill "#kw" "{{query}}"
+click "#su" --wait-nav
+wait "#content_left"
+query "#content_left"
+```
+````
+
+规则：
+
+- `steps` 每行一个 `browser` 子命令（不写 `browser` 前缀），支持 `open/goto/state/fill/click/press/select/hover/wait/query/snapshot/screenshot/switch/close/mode/focus/console/network/debug/eval/drag` 等；`stop/status/recipe/experience/profiles` 不允许。
+- 动态内容一律 `{{name}}` 占位，`- 参数:` 行声明 `name=说明`，运行时 `--var name=value`。**不要**把真实账号、密码、token、OTP、证件号写进文件或参数说明。
+- **不要**在 steps 里写 `--allow-auth`；只有用户本次明确要求代登录时，才在 `recipe run` 命令上加 `--allow-auth`（脚本文件本身永不保存该授权）。滑块/CAPTCHA 仍必须由用户完成。
+- `--profile` 只需写在第一个 `open` 步骤或 frontmatter，`recipe run` 会注入后续步骤；单步也可自己覆盖。
+- 成功的点击后补 `wait` 或 `--wait-nav`；读结果用 `query`/`snapshot`；避免 `--js`（除非用户明确要求）。
+
+**流程**：
+
+1. 任务开始：先 `"$BROWSER" recipe show <domain> "<任务>"`；`recorded:true` 就直接 `"$BROWSER" recipe run <domain> "<任务>" --var name=value`。
+2. 没有脚本：照常手动操作；完成后 `"$BROWSER" recipe log <domain> "<任务>"` 记一次（文件不存在时先按 `references/recipe-template.md` 创建）。
+3. `recipe log` 返回 `count>=3` 且还没 steps：把这次稳定步骤写成 `steps` 代码块，再 `recipe run` 复跑一次验证。
+4. `recipe run` 返回 `ok:false`：看 `failedStep` + 该步 `error` + `screenshot`；页面保留现场，直接用同一 profile 接管手动完成（不要重开页面）。成功后修正 steps（选择器/等待/参数），再跑一次；连续两次失败就删掉 steps 或降级为纯提示，避免误导。
+5. 收尾：`recipe log` 记录成功次数，并在经验文件“验证记录”里注明脚本可用/已修正。
+
+查看全部：`"$BROWSER" recipe list [domain-filter]`；只看次数和参数：`recipe show <domain>`。`recipe run --dry-run` 只校验参数与命令，不执行。
 
 ## Quick start
 
@@ -204,6 +245,10 @@ A profile fingerprint is rebuilt automatically if the same profile is opened on 
 | `experience related <domain>` | List same-app / alias / normalized-domain experiences without loading full content |
 | `experience current [--profile name]` | Resolve the active page URL and read that host's experience |
 | `experience validate <domain>` | Validate frontmatter and required sections |
+| `recipe list [filter]` | List saved operation recipes, their task counters and whether steps exist |
+| `recipe show <domain> [task]` | Show a task's params, counter and steps |
+| `recipe log <domain> <task>` | Increment that task's `次数` and stamp `最近` |
+| `recipe run <domain> <task> [--var k=v]... [--dry-run] [--profile name]` | Replay the task's `steps`; stops at the first failure and keeps the page for manual takeover |
 
 All commands return JSON. `ok:false` means the action failed; inspect `error.code`, `error.message`, `error.diagnosis`, and the automatic `error.screenshot` / `error.recentConsole` / `error.recentNetwork` attachments.
 

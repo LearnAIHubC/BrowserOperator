@@ -13,6 +13,7 @@ Read this in Chinese: [README_CN.md](README_CN.md)
 - Snapshot, query, click, drag, fill, select, hover, press, wait, switch, and screenshot primitives.
 - Console, network, and dialog capture, with a screenshot attached to every failed action.
 - Per-site experience files (`~/.dsh/browser-operator/experiences/<domain>.md`) written after a successful run.
+- Repeatable task recipes (`~/.dsh/browser-operator/脚本/<domain>.md`): once the same task has been done twice, the third run is stored as CLI steps with `{{placeholders}}` and replayed by `recipe run --var ...`; a failed replay keeps the page for manual takeover and refinement.
 - `restore-session on` keeps session cookies (for example a Tomcat `JSESSIONID`) across browser restarts.
 - Native dialogs default to **dismiss/cancel**; `dialog accept` confirms explicitly and `dialog accept --text` fills prompts. `dialogs` evidence is returned by `click` / `open` / `debug`.
 - One fixed fingerprint per profile: normal Chrome UA in headless (no `HeadlessChrome`), matching platform/vendor/WebGL, and stable Canvas/Audio noise.

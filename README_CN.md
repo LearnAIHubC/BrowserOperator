@@ -13,6 +13,7 @@ BrowserOperator 是一个用于持久化 Chrome 自动化的 Agent Skill。它�
 - 提供 snapshot、query、click、drag、fill、select、hover、press、wait、switch、screenshot 等原子操作。
 - 自动收集 console、network、dialog；操作失败时自动附带截图与最近请求。
 - 每个站点一份经验文件（`~/.dsh/browser-operator/experiences/<domain>.md`），探索成功后写入。
+- 每个站点一份操作脚本（`~/.dsh/browser-operator/脚本/<domain>.md`）：同一任务做满 2 次后，第 3 次沉淀为带 `{{占位符}}` 的 CLI 步骤，`recipe run --var ...` 一键重放；失败时保留页面现场，交给 LLM 接管并修正脚本。
 - `restore-session on`：重启浏览器后仍能恢复 session cookie（例如 Tomcat 的 `JSESSIONID`）。
 - 原生弹窗默认 **dismiss（取消）**；显式 `dialog accept` 才确认，`dialog accept --text` 可填写 prompt；`click` / `open` / `debug` 返回 `dialogs` 证据。
 - 每个 Profile 一套固定指纹：headless 下也是普通 Chrome UA（无 `HeadlessChrome`），platform/vendor/WebGL 与宿主一致，Canvas/Audio 噪声稳定。

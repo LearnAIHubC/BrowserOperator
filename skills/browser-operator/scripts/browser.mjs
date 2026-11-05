@@ -37,6 +37,7 @@ const HOME = process.env.BROWSER_OPERATOR_HOME || join(homedir(), ".dsh", "brows
 const PROFILES = join(HOME, "profiles");
 const SHOTS = join(HOME, "screenshots");
 const EXPERIENCES = join(HOME, "experiences");
+const RECIPES = join(HOME, "脚本");
 const DEFAULT_PROFILE = "default";
 const DEFAULT_TIMEOUT = 15_000;
 const DEFAULT_SNAPSHOT_CHARS = 30_000;
@@ -2232,6 +2233,513 @@ function experienceValidateAction(value) {
   return { ok: errors.length === 0, action: "experience-validate", path, meta, errors };
 }
 
+// ── operation recipes (脚本) ─────────────────────────────────────
+//
+// One Markdown file per site under ~/.dsh/browser-operator/脚本/, mirroring
+// the experience files: an LLM can read and hand-edit it. Each task is an
+// `##` section with a counter and a fenced ```steps block of CLI commands;
+// dynamic values use {{placeholders}} and are supplied with --var at run time.
+// Steps never carry stored credentials or --allow-auth; explicit one-off
+// authorization stays on the run command.
+
+const RECIPE_ACTIONS = new Set([
+  "open",
+  "goto",
+  "state",
+  "focus",
+  "snapshot",
+  "query",
+  "click",
+  "eval",
+  "drag",
+  "fill",
+  "press",
+  "hover",
+  "select",
+  "wait",
+  "screenshot",
+  "switch",
+  "close",
+  "mode",
+  "dialog",
+  "console",
+  "network",
+  "debug",
+  "wait-login",
+  "wait-verification",
+]);
+const RECIPE_AUTH_ACTIONS = new Set(["click", "fill", "press", "select"]);
+
+function ensureRecipesDir() {
+  ensureHome();
+  mkdirSync(RECIPES, { recursive: true, mode: 0o700 });
+}
+
+function recipePath(value) {
+  ensureRecipesDir();
+  return join(RECIPES, `${normalizeDomain(value)}.md`);
+}
+
+function recipeSlug(value) {
+  return (
+    String(value || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 60) || "task"
+  );
+}
+
+function recipeTaskKey(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[`"'*_]/g, "")
+    .replace(/[\s:：]+/g, "")
+    .trim();
+}
+
+function parseRecipeParams(value) {
+  return String(value || "")
+    .split(/[;；]/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((item) => {
+      const at = item.indexOf("=");
+      if (at <= 0) return { name: item, description: "" };
+      return { name: item.slice(0, at).trim(), description: item.slice(at + 1).trim() };
+    })
+    .filter((param) => param.name);
+}
+
+function recipeTasks(text) {
+  const lines = String(text || "").split(/\r?\n/);
+  const tasks = [];
+  let current = null;
+  let fence = null;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const marker = line.match(/^\s*```([A-Za-z0-9_-]*)\s*$/);
+    if (marker) {
+      if (!fence) {
+        fence = { collecting: null };
+        if (current && /^(steps|bash|sh)$/i.test(marker[1])) fence.collecting = [];
+      } else {
+        if (fence.collecting && current) {
+          current.steps = fence.collecting.filter((item) => item.trim());
+        }
+        fence = null;
+      }
+      continue;
+    }
+    if (fence) {
+      if (fence.collecting) fence.collecting.push(line);
+      continue;
+    }
+    const heading = line.match(/^##\s+(.+?)\s*$/);
+    if (heading) {
+      current = {
+        title: heading[1].replace(/\s*#+\s*$/, "").trim(),
+        headingIndex: index,
+        endIndex: lines.length,
+        count: 0,
+        params: [],
+        steps: [],
+      };
+      tasks.push(current);
+      continue;
+    }
+    if (!current) continue;
+    const count = line.match(/^\s*[-*]\s*次数\s*[:：]\s*(\d+)/);
+    if (count) current.count = Number(count[1]);
+    const params = line.match(/^\s*[-*]\s*参数\s*[:：]\s*(.+)$/);
+    if (params) current.params = parseRecipeParams(params[1]);
+  }
+  tasks.forEach((task, index) => {
+    task.endIndex = index + 1 < tasks.length ? tasks[index + 1].headingIndex : lines.length;
+  });
+  return tasks;
+}
+
+function pickRecipeTask(tasks, wanted) {
+  const target = String(wanted || "").trim();
+  if (!target) return tasks.length === 1 ? tasks[0] : null;
+  const exact = tasks.find((task) => task.title === target);
+  if (exact) return exact;
+  const key = recipeTaskKey(target);
+  const byKey = tasks.find((task) => recipeTaskKey(task.title) === key);
+  if (byKey) return byKey;
+  const slug = recipeSlug(target);
+  return tasks.find((task) => recipeSlug(task.title) === slug) || null;
+}
+
+function tokenizeRecipeStep(line) {
+  const tokens = [];
+  let current = "";
+  let quote = "";
+  let started = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    if (quote) {
+      if (char === quote) {
+        quote = "";
+        continue;
+      }
+      if (char === "\\" && quote === '"') {
+        current += line[index + 1] ?? "";
+        index += 1;
+        continue;
+      }
+      current += char;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      started = true;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      if (started || current) {
+        tokens.push(current);
+        current = "";
+        started = false;
+      }
+      continue;
+    }
+    current += char;
+    started = true;
+  }
+  if (quote) throw new Error("引号未闭合");
+  if (started || current) tokens.push(current);
+  return tokens;
+}
+
+function substituteRecipeToken(token, vars, missing, used) {
+  return String(token).replace(/\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}/g, (match, name) => {
+    used?.add(name);
+    if (Object.prototype.hasOwnProperty.call(vars, name)) return vars[name];
+    missing.add(name);
+    return match;
+  });
+}
+
+function parseRecipeVars(value) {
+  const list = Array.isArray(value) ? value : value ? [value] : [];
+  const vars = {};
+  for (const item of list) {
+    const at = String(item).indexOf("=");
+    if (at <= 0) continue;
+    vars[String(item).slice(0, at).trim()] = String(item).slice(at + 1);
+  }
+  return vars;
+}
+
+function compactRecipeResult(value) {
+  if (value === undefined) return undefined;
+  const text = JSON.stringify(value);
+  if (text.length <= 4000) return value;
+  return { truncated: true, bytes: text.length, preview: text.slice(0, 2000) };
+}
+
+function captureRecipeFailure(domain, title, profile) {
+  try {
+    ensureHome();
+    const file = join(SHOTS, `recipe-${recipeSlug(domain)}-${recipeSlug(title)}-${Date.now()}.png`);
+    const args = [SELF, "screenshot", file];
+    if (profile) args.push("--profile", String(profile));
+    const child = spawnSync(process.execPath, args, { encoding: "utf8", timeout: 30_000, env: process.env });
+    return child.status === 0 && existsSync(file) ? file : "";
+  } catch {
+    return "";
+  }
+}
+
+function recipeListAction(filter) {
+  ensureRecipesDir();
+  const needle = String(filter || "").toLowerCase();
+  const recipes = [];
+  for (const entry of readdirSync(RECIPES, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
+    const domain = entry.name.replace(/\.md$/, "");
+    if (!/^[a-z0-9.-]+$/.test(domain)) continue;
+    if (needle && !domain.includes(needle)) continue;
+    const path = join(RECIPES, entry.name);
+    const text = readFileSync(path, "utf8");
+    const meta = parseExperienceMeta(text);
+    recipes.push({
+      domain,
+      path,
+      site: meta.site || "",
+      app: meta.app || "",
+      environment: meta.environment || "",
+      updated: meta.updated || "",
+      tasks: recipeTasks(text).map((task) => ({
+        title: task.title,
+        count: task.count,
+        recorded: task.steps.length > 0,
+        params: task.params.map((param) => param.name),
+      })),
+    });
+  }
+  recipes.sort((a, b) => a.domain.localeCompare(b.domain));
+  return { ok: true, action: "recipe-list", directory: RECIPES, recipes };
+}
+
+function recipeShowAction(domainInput, wanted) {
+  const domain = normalizeDomain(domainInput);
+  const path = recipePath(domain);
+  if (!existsSync(path)) {
+    return { ok: true, action: "recipe-show", found: false, domain, path, tasks: [] };
+  }
+  const content = readFileSync(path, "utf8");
+  const tasks = recipeTasks(content);
+  if (!wanted) {
+    return {
+      ok: true,
+      action: "recipe-show",
+      found: true,
+      domain,
+      path,
+      meta: parseExperienceMeta(content),
+      tasks: tasks.map(({ title, count, params, steps }) => ({
+        title,
+        count,
+        params,
+        recorded: steps.length > 0,
+      })),
+    };
+  }
+  const task = pickRecipeTask(tasks, wanted);
+  if (!task) {
+    return {
+      ok: false,
+      action: "recipe-show",
+      domain,
+      path,
+      error: { code: "recipe-task-not-found", message: `没有找到任务: ${wanted}` },
+      available: tasks.map((item) => item.title),
+    };
+  }
+  return {
+    ok: true,
+    action: "recipe-show",
+    found: true,
+    domain,
+    path,
+    task: { title: task.title, count: task.count, params: task.params, steps: task.steps },
+  };
+}
+
+function recipeLogAction(domainInput, wanted) {
+  const domain = normalizeDomain(domainInput);
+  const path = recipePath(domain);
+  if (!existsSync(path)) {
+    return {
+      ok: false,
+      action: "recipe-log",
+      domain,
+      path,
+      error: { code: "recipe-not-found", message: `还没有脚本文件: ${path}；先按 references/recipe-template.md 创建` },
+    };
+  }
+  const text = readFileSync(path, "utf8");
+  const lines = text.split(/\r?\n/);
+  const tasks = recipeTasks(text);
+  const task = pickRecipeTask(tasks, wanted);
+  if (!task) {
+    return {
+      ok: false,
+      action: "recipe-log",
+      domain,
+      path,
+      error: { code: "recipe-task-not-found", message: `没有找到任务: ${wanted || "(未指定)"}` },
+      available: tasks.map((item) => item.title),
+    };
+  }
+  const section = lines.slice(task.headingIndex, task.endIndex);
+  const count = task.count + 1;
+  let countIndex = section.findIndex((line) => /^\s*[-*]\s*次数\s*[:：]/.test(line));
+  if (countIndex >= 0) {
+    section[countIndex] = section[countIndex].replace(/(次数\s*[:：]\s*)\d+/, `$1${count}`);
+  } else {
+    section.splice(1, 0, `- 次数: ${count}`);
+    countIndex = 1;
+  }
+  const today = new Date().toISOString().slice(0, 10);
+  const recentIndex = section.findIndex((line) => /^\s*[-*]\s*最近\s*[:：]/.test(line));
+  if (recentIndex >= 0) section[recentIndex] = `- 最近: ${today}`;
+  else section.splice(countIndex + 1, 0, `- 最近: ${today}`);
+  lines.splice(task.headingIndex, task.endIndex - task.headingIndex, ...section);
+  writeFileSync(path, lines.join("\n") + (text.endsWith("\n") ? "\n" : ""));
+
+  const recorded = task.steps.length > 0;
+  const result = { ok: true, action: "recipe-log", domain, path, task: task.title, count, recorded, updated: today };
+  if (recorded) result.hint = "已有脚本：先 recipe run，成功后再 log 记一次";
+  else if (count >= 3) result.hint = "已到第 3 次：把这次操作写进该任务的 ```steps 代码块，动态值用 {{占位符}} 并在参数行声明";
+  else result.hint = `再做 ${3 - count} 次即可录制脚本`;
+  return result;
+}
+
+async function recipeRunAction(domainInput, wanted, flags) {
+  const domain = normalizeDomain(domainInput);
+  const path = recipePath(domain);
+  if (!existsSync(path)) {
+    return { ok: false, action: "recipe-run", domain, path, error: { code: "recipe-not-found", message: `还没有脚本文件: ${path}` } };
+  }
+  const content = readFileSync(path, "utf8");
+  const tasks = recipeTasks(content);
+  const meta = parseExperienceMeta(content);
+  const task = pickRecipeTask(tasks, wanted);
+  if (!task) {
+    return {
+      ok: false,
+      action: "recipe-run",
+      domain,
+      path,
+      error: { code: "recipe-task-not-found", message: `没有找到任务: ${wanted || "(未指定)"}` },
+      available: tasks.map((item) => item.title),
+    };
+  }
+  if (!task.steps.length) {
+    return {
+      ok: false,
+      action: "recipe-run",
+      domain,
+      path,
+      task: task.title,
+      error: { code: "recipe-empty", message: "该任务还没有 steps 代码块" },
+      hint: "先手动操作，成功后把稳定步骤写进该任务的 ```steps 代码块",
+    };
+  }
+
+  const vars = parseRecipeVars(flags.var);
+  const missing = new Set();
+  const problems = [];
+  const steps = [];
+
+  // A recipe should not have to repeat --profile on every line. Prefer an
+  // explicit --profile on the run command, then frontmatter `profile`, then
+  // the profile named on the first open/goto step.
+  let recipeProfile = String(meta.profile || "");
+  for (const raw of task.steps) {
+    try {
+      const tokens = tokenizeRecipeStep(raw.trim());
+      if (tokens[0] === "open" || tokens[0] === "goto") {
+        const at = tokens.indexOf("--profile");
+        if (at >= 0 && tokens[at + 1]) {
+          recipeProfile = tokens[at + 1];
+          break;
+        }
+      }
+    } catch {
+      // A broken line is reported by the main parse loop below.
+    }
+  }
+  const effectiveProfile = String(flags.profile || recipeProfile || "");
+
+  for (const raw of task.steps) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    let tokens;
+    try {
+      tokens = tokenizeRecipeStep(line);
+    } catch (error) {
+      problems.push(`无法解析「${line}」: ${error.message}`);
+      continue;
+    }
+    if (!tokens.length) continue;
+    const action = tokens[0];
+    if (!RECIPE_ACTIONS.has(action)) {
+      problems.push(`不支持的命令: ${action}（${line}）`);
+      continue;
+    }
+    if (tokens.includes("--allow-auth") && !flags["allow-auth"]) {
+      problems.push(`脚本不得内置 --allow-auth（${line}）；用户本次明确授权代登录时，在 run 上加 --allow-auth`);
+      continue;
+    }
+    const used = new Set();
+    const argv = tokens.map((token) => substituteRecipeToken(token, vars, missing, used));
+    if (flags["allow-auth"] && RECIPE_AUTH_ACTIONS.has(action) && !argv.includes("--allow-auth")) {
+      argv.push("--allow-auth");
+    }
+    if (effectiveProfile && !argv.includes("--profile")) argv.push("--profile", effectiveProfile);
+    steps.push({ action, source: line, argv, params: [...used] });
+  }
+  if (missing.size) problems.push(`缺少参数: ${[...missing].map((name) => `--var ${name}=...`).join(" ")}`);
+  if (problems.length) {
+    return {
+      ok: false,
+      action: "recipe-run",
+      domain,
+      path,
+      task: task.title,
+      error: { code: "recipe-invalid", message: problems.join("；") },
+      declaredParams: task.params,
+    };
+  }
+  if (flags["dry-run"]) {
+    return {
+      ok: true,
+      action: "recipe-run",
+      dryRun: true,
+      domain,
+      path,
+      task: task.title,
+      params: Object.keys(vars),
+      steps: steps.map((step, index) => ({ index: index + 1, action: step.action, source: step.source, params: step.params })),
+    };
+  }
+
+  const results = [];
+  let failed = null;
+  for (const [index, step] of steps.entries()) {
+    const started = Date.now();
+    const child = spawnSync(process.execPath, [SELF, ...step.argv], {
+      encoding: "utf8",
+      timeout: 300_000,
+      env: process.env,
+      maxBuffer: 16 * 1024 * 1024,
+    });
+    let parsed;
+    try {
+      parsed = JSON.parse(String(child.stdout || "").trim());
+    } catch {
+      parsed = undefined;
+    }
+    const ok = child.status === 0 && parsed?.ok !== false;
+    const entry = { index: index + 1, action: step.action, command: step.source, ok, ms: Date.now() - started };
+    if (parsed !== undefined) entry.result = compactRecipeResult(parsed);
+    if (!ok) {
+      entry.error =
+        parsed?.error || {
+          code: "step-failed",
+          message: (String(child.stderr || "").trim() || `exit ${child.status}`).slice(0, 800),
+        };
+      results.push(entry);
+      failed = entry;
+      break;
+    }
+    results.push(entry);
+  }
+
+  const output = {
+    ok: !failed,
+    action: "recipe-run",
+    domain,
+    path,
+    task: task.title,
+    profile: effectiveProfile || undefined,
+    params: Object.keys(vars),
+    steps: results,
+  };
+  if (failed) {
+    output.failedStep = failed.index;
+    const screenshot = captureRecipeFailure(domain, task.title, effectiveProfile);
+    if (screenshot) output.screenshot = screenshot;
+    output.hint = "脚本已中断并保留现场；先接管手动完成，成功后修正该任务的 steps，再重跑验证";
+  }
+  return output;
+}
+
 // ── daemon ───────────────────────────────────────────────────────
 
 let currentProfile = DEFAULT_PROFILE;
@@ -2502,6 +3010,7 @@ function parseArgs(argv) {
     "errors",
     "html",
     "all-attrs",
+    "dry-run",
   ]);
   for (let index = 0; index < argv.length; index++) {
     const arg = argv[index];
@@ -2515,10 +3024,18 @@ function parseArgs(argv) {
     }
     const equals = arg.indexOf("=");
     if (equals >= 0) {
-      flags[arg.slice(2, equals)] = arg.slice(equals + 1);
+      const key = arg.slice(2, equals);
+      const value = arg.slice(equals + 1);
+      if (key === "var") (flags.var ||= []).push(value);
+      else flags[key] = value;
       continue;
     }
     const key = arg.slice(2);
+    if (key === "var") {
+      (flags.var ||= []).push(argv[index + 1]);
+      index++;
+      continue;
+    }
     if (booleanFlags.has(key)) {
       flags[key] = true;
       continue;
@@ -2544,7 +3061,7 @@ async function main() {
 
   const command = positional.shift();
   if (!command) {
-    console.error("用法: browser <open|state|snapshot|query|click|eval|drag|fill|press|hover|select|wait|screenshot|switch|wait-login|console|network|debug|wait-verification|mode|focus|close|experience|restore-session|fingerprint|stop|status|profiles> ...");
+    console.error("用法: browser <open|state|snapshot|query|click|eval|drag|fill|press|hover|select|wait|screenshot|switch|wait-login|console|network|debug|wait-verification|mode|focus|close|experience|recipe|restore-session|fingerprint|stop|status|profiles> ...");
     process.exit(2);
   }
 
@@ -2567,6 +3084,26 @@ async function main() {
       result = { ...experienceShowAction(domain), resolvedFrom: maskUrl(state.url) };
     }
     else result = { ok: false, action: "experience", error: { code: "unknown-command", message: "用法: experience <list|path|show|related|validate|current> [domain]" } };
+    print(result);
+    if (result.ok === false) process.exit(1);
+    return;
+  }
+
+  if (command === "recipe") {
+    const sub = positional.shift();
+    const value = positional[0] || flags.domain || "";
+    const wanted = positional[1] || flags.task || "";
+    let result;
+    if (sub === "list") result = recipeListAction(value);
+    else if (sub === "show") result = recipeShowAction(value, wanted);
+    else if (sub === "log") result = recipeLogAction(value, wanted);
+    else if (sub === "run") result = await recipeRunAction(value, wanted, flags);
+    else
+      result = {
+        ok: false,
+        action: "recipe",
+        error: { code: "unknown-command", message: "用法: recipe <list|show|log|run> <domain> [task]" },
+      };
     print(result);
     if (result.ok === false) process.exit(1);
     return;
