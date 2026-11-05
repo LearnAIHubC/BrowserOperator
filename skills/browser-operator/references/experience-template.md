@@ -42,7 +42,7 @@ tags: [<tag1>, <tag2>]
 
 ## 结果读取
 
-- 结果顺序：`<selector>` 的可见顺序；第 1 个是第一条。以 `query` 返回的 `items`（`inViewport:true`）为准，`count` 可能包含隐藏/重复节点，不能直接当序号。
+- 结果顺序：`query.items` 按选择器匹配的 DOM 顺序返回，可能包含隐藏/屏幕外节点，并受 `--limit` 截断；`count` 是总匹配数。`click --nth N` 按该选择器的 DOM 匹配顺序从 1 编号，指定隐藏节点会失败。先用选择器排除广告和重复节点；`inViewport:true` 只表示与视口相交，不代表可见或可点击。
 - 广告/推荐卡：`<如何识别和排除>`。
 - 点击后：`新标签页 / 同页跳转`；daemon 会自动切换 active page。
 - 详情读取：`state` 取 title/url，`snapshot --mode text` 取正文；需要结构化字段时用 `query`。
@@ -52,7 +52,7 @@ tags: [<tag1>, <tag2>]
 
 ## 陷阱
 
-- 登录/验证/滑块必须由用户完成；不要点击或尝试绕过。
+- 默认由用户手动登录；用户在当前对话明确授权代登录时，登录操作才可加 `--allow-auth`。滑块/CAPTCHA 始终由用户完成，不尝试绕过。
 - `<站点特有陷阱：广告、懒加载、弹窗、iframe、重定向、编码、分页...>`
 - 列表页选择器在详情页可能只剩分享栏/推荐位，不要直接复用；先重新 `query`。
 - 拖拽：先 `drag`，观察 `effect.mutations/urlChanged`；无变化时再考虑 `--method mouse` 或 `--method js --allow-js`，不要直接用 DB/内部接口绕过 UI。
