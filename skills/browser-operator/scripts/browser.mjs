@@ -564,6 +564,54 @@ function buildFingerprintScript(fingerprint, userAgent, locale) {
 })();`;
 }
 
+// ── window focus (macOS) ─────────────────────────────────────────
+// Headed Chrome takes the foreground when it launches or when a page is
+// brought to front, which interrupts whatever the user is doing. Capture the
+// app that was frontmost before launch and hand focus back; headed windows
+// stay behind until someone runs `browser focus`.
+const CHROME_BUNDLE = /^com\.(google\.chrome|google\.chrome\.canary|chromium)/i;
+
+function macFrontmostBundleId() {
+  if (process.platform !== "darwin") return null;
+  try {
+    const front = spawnSync("lsappinfo", ["front"], { encoding: "utf8" });
+    const asn = String(front.stdout || "").trim();
+    if (!asn) return null;
+    const info = spawnSync("lsappinfo", ["info", "-only", "bundleid", asn], { encoding: "utf8" });
+    const match = String(info.stdout || "").match(/bundleID="([^"]+)"/);
+    return match ? match[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+function reactivateApp(bundleId) {
+  if (process.platform !== "darwin" || !bundleId || CHROME_BUNDLE.test(bundleId)) return;
+  try {
+    spawnSync("open", ["-b", bundleId], { stdio: "ignore" });
+  } catch {}
+}
+
+// Chrome can grab the foreground for a few seconds after a headed launch
+// (window creation, page autofocus, heavy first paint). Check a few times and
+// give focus back, but only while Chrome itself is frontmost.
+function scheduleFocusRestore(bundleId) {
+  if (process.platform !== "darwin" || !bundleId || CHROME_BUNDLE.test(bundleId)) return;
+  for (const delay of [0, 600, 1500, 3000]) {
+    setTimeout(() => {
+      const front = macFrontmostBundleId();
+      if (front && CHROME_BUNDLE.test(front)) reactivateApp(bundleId);
+    }, delay).unref?.();
+  }
+}
+
+// Bring the page forward only in headless mode. In headed mode the window is
+// left where the user put it; `browser focus` is the explicit override.
+async function foregroundPage(page) {
+  if (!currentHeadless) return;
+  await page.bringToFront().catch(() => {});
+}
+
 // ── browser launch ───────────────────────────────────────────────
 
 async function launchBrowser(profile, headless) {
@@ -578,6 +626,7 @@ async function launchBrowser(profile, headless) {
   const userAgent = settings.userAgent || buildUserAgent(chromeVersion);
   const locale = settings.locale || null;
   const timezoneId = settings.timezone || null;
+  const frontApp = headless ? null : macFrontmostBundleId();
   const args = [
     "--disable-blink-features=AutomationControlled",
     "--no-first-run",
@@ -648,7 +697,15 @@ async function launchBrowser(profile, headless) {
     if (extra !== page) await extra.close().catch(() => {});
   }
   attachDiagnostics(page);
-  await page.bringToFront().catch(() => {});
+  if (headless) {
+    await page.bringToFront().catch(() => {});
+  } else {
+    // Hand the foreground back to whatever the user was using. Chrome — and
+    // heavy pages that call focus() — can re-activate well after launch, so
+    // keep checking for a few seconds and only correct it while Chrome is
+    // actually frontmost (never fight a deliberate user switch).
+    scheduleFocusRestore(frontApp);
+  }
   return { context, page };
 }
 
@@ -838,6 +895,13 @@ async function manualAuthHints(page) {
     return { required: true, kind: "login", reasons: login.reasons };
   }
   return { required: false, kind: null, reasons: [] };
+}
+
+// 默认：遇到登录页时 agent 不做任何输入，交给用户在可见浏览器完成。
+// 例外：用户在当前对话里明确要求「帮我输入账号密码登录 / 帮我点登录」时，调用方才显式传 --allow-auth。
+// 该例外只覆盖 kind=login；滑块/CAPTCHA 等 verification 永远不放开。
+function authOverrideAllowed(body, manualAuth) {
+  return Boolean(body && body.allowAuth) && manualAuth && manualAuth.kind === "login";
 }
 
 async function stateAction() {
@@ -1272,10 +1336,11 @@ async function clickAction(body) {
   const selector = String(body.selector || "").trim();
   if (!selector) throw fail("bad-request", "click 需要 selector");
   const manualAuth = await manualAuthHints(page);
-  if (manualAuth.required) {
+  const authOverride = authOverrideAllowed(body, manualAuth);
+  if (manualAuth.required && !authOverride) {
     throw fail(
       "manual-auth-required",
-      `页面需要用户${manualAuth.kind === "verification" ? "完成验证" : "登录"}；agent 不执行登录/验证操作。请先运行 mode headed，让用户在可见浏览器完成后重试。`,
+      `页面需要用户${manualAuth.kind === "verification" ? "完成验证" : "登录"}；agent 不执行登录/验证操作。请先运行 mode headed，让用户在可见浏览器完成后重试；若用户已明确要求由你代填账号密码或代点登录，再加 --allow-auth。`,
       manualAuth,
     );
   }
@@ -1314,7 +1379,7 @@ async function clickAction(body) {
     if (popup) {
       activePage = popup;
       await popup.waitForLoadState("domcontentloaded", { timeout: 5000 }).catch(() => {});
-      await popup.bringToFront().catch(() => {});
+      await foregroundPage(popup);
     }
     const probe = frame ? { events: [], mutations: 0 } : await drainProbe(page);
     return {
@@ -1375,7 +1440,7 @@ async function clickAction(body) {
   if (current !== page) {
     activePage = current;
     await current.waitForLoadState("domcontentloaded", { timeout: 5000 }).catch(() => {});
-    await current.bringToFront().catch(() => {});
+    await foregroundPage(current);
   }
 
   const probe = frame ? { events: [], mutations: 0 } : await drainProbe(page);
@@ -1427,6 +1492,7 @@ async function clickAction(body) {
     profile: currentProfile,
     method: force ? "playwright-mouse-force" : "playwright-mouse",
     trusted: true,
+    authOverride: authOverride || undefined,
     target: targetInfo,
     effect,
     warning: warning || undefined,
@@ -1572,7 +1638,7 @@ async function openAction(body) {
   await sleep(500);
   await page.waitForLoadState("networkidle", { timeout: 3000 }).catch(() => {});
   activePage = page;
-  await page.bringToFront().catch(() => {});
+  await foregroundPage(page);
   let state = await stateAction();
   state.dialogs = diagnostics.dialog.slice(dialogCountBefore);
   if (state.manualAuth?.required && currentHeadless && body.autoHeaded !== false) {
@@ -1727,10 +1793,11 @@ async function fillAction(body) {
   if (!selector) throw fail("bad-request", "fill 需要 selector");
   const page = getPage();
   const manualAuth = await manualAuthHints(page);
-  if (manualAuth.required) {
+  const authOverride = authOverrideAllowed(body, manualAuth);
+  if (manualAuth.required && !authOverride) {
     throw fail(
       "manual-auth-required",
-      `页面需要用户${manualAuth.kind === "verification" ? "完成验证" : "登录"}；agent 不填写登录/验证字段。请先运行 mode headed，让用户在可见浏览器完成后重试。`,
+      `页面需要用户${manualAuth.kind === "verification" ? "完成验证" : "登录"}；agent 不填写登录/验证字段。请先运行 mode headed，让用户在可见浏览器完成后重试；若用户已明确要求由你代填账号密码，再加 --allow-auth。`,
       manualAuth,
     );
   }
@@ -1750,7 +1817,7 @@ async function fillAction(body) {
   } else {
     await target.fill(value, { timeout });
   }
-  return { ok: true, action: "fill", profile: currentProfile, target: await describeLocator(target), url: maskUrl(getPage().url()) };
+  return { ok: true, action: "fill", authOverride: authOverride || undefined, profile: currentProfile, target: await describeLocator(target), url: maskUrl(getPage().url()) };
 }
 
 async function pressAction(body) {
@@ -1758,11 +1825,12 @@ async function pressAction(body) {
   if (!key) throw fail("bad-request", "press 需要 key");
   const page = getPage();
   const manualAuth = await manualAuthHints(page);
-  if (manualAuth.required) {
-    throw fail("manual-auth-required", "页面需要用户登录/验证；agent 不发送可能提交登录或验证的按键。请先运行 mode headed。", manualAuth);
+  const authOverride = authOverrideAllowed(body, manualAuth);
+  if (manualAuth.required && !authOverride) {
+    throw fail("manual-auth-required", "页面需要用户登录/验证；agent 不发送可能提交登录或验证的按键。请先运行 mode headed；若用户已明确要求由你代按登录，再加 --allow-auth。", manualAuth);
   }
   await page.keyboard.press(key);
-  return { ok: true, action: "press", key, url: maskUrl(getPage().url()) };
+  return { ok: true, action: "press", key, authOverride: authOverride || undefined, url: maskUrl(getPage().url()) };
 }
 
 async function hoverAction(body) {
@@ -1779,7 +1847,8 @@ async function selectAction(body) {
   const selector = String(body.selector || "").trim();
   if (!selector) throw fail("bad-request", "select 需要 selector");
   const manualAuth = await manualAuthHints(getPage());
-  if (manualAuth.required) {
+  const authOverride = authOverrideAllowed(body, manualAuth);
+  if (manualAuth.required && !authOverride) {
     throw fail("manual-auth-required", "页面需要用户登录/验证；agent 不执行登录/验证操作。", manualAuth);
   }
   const root = await getRoot(String(body.frame || ""));
@@ -1788,7 +1857,7 @@ async function selectAction(body) {
     ? { label: String(body.value ?? "") }
     : String(body.value ?? "");
   await target.selectOption(value, { timeout: Number(body.timeout) || DEFAULT_TIMEOUT });
-  return { ok: true, action: "select", profile: currentProfile, target: await describeLocator(target), url: maskUrl(getPage().url()) };
+  return { ok: true, action: "select", authOverride: authOverride || undefined, profile: currentProfile, target: await describeLocator(target), url: maskUrl(getPage().url()) };
 }
 
 async function waitAction(body) {
@@ -1892,7 +1961,7 @@ async function closeAction() {
   await page.close();
   const remaining = context.pages().filter((candidate) => !candidate.isClosed());
   activePage = remaining[0] || null;
-  if (activePage) await activePage.bringToFront().catch(() => {});
+  if (activePage) await foregroundPage(activePage);
   return { ok: true, action: "close", closedUrl, state: await stateAction() };
 }
 
@@ -1903,8 +1972,22 @@ async function switchAction(body) {
   else if (body.urlIncludes) page = pages.find((candidate) => candidate.url().includes(String(body.urlIncludes))) || null;
   if (!page) throw fail("page-not-found", "没有匹配的标签页");
   activePage = page;
-  await page.bringToFront().catch(() => {});
+  await foregroundPage(page);
   return stateAction();
+}
+
+// Explicit "bring the headed window to front". Headed launches deliberately
+// stay behind so automation never interrupts the user; use this when the user
+// needs to log in or verify something.
+async function focusAction() {
+  const page = getPage();
+  await page.bringToFront().catch(() => {});
+  if (process.platform === "darwin") {
+    try {
+      spawnSync("open", ["-b", "com.google.Chrome"], { stdio: "ignore" });
+    } catch {}
+  }
+  return { ok: true, action: "focus", headless: currentHeadless, state: await stateAction() };
 }
 
 async function waitLoginAction(body) {
@@ -2259,6 +2342,7 @@ async function runDaemon(flags) {
           case "/screenshot": result = await screenshotAction(body); break;
           case "/switch": result = await switchAction(body); break;
           case "/close": result = await closeAction(); break;
+          case "/focus": result = await focusAction(); break;
           case "/mode": result = await switchModeAction(body); break;
           case "/wait-login": result = await waitLoginAction(body); break;
           case "/console": result = await consoleAction(body); break;
@@ -2412,6 +2496,7 @@ function parseArgs(argv) {
     "label",
     "append",
     "allow-js",
+    "allow-auth",
     "reset",
     "clear",
     "errors",
@@ -2459,7 +2544,7 @@ async function main() {
 
   const command = positional.shift();
   if (!command) {
-    console.error("用法: browser <open|state|snapshot|query|click|eval|drag|fill|press|hover|select|wait|screenshot|switch|wait-login|console|network|debug|wait-verification|mode|close|experience|restore-session|fingerprint|stop|status|profiles> ...");
+    console.error("用法: browser <open|state|snapshot|query|click|eval|drag|fill|press|hover|select|wait|screenshot|switch|wait-login|console|network|debug|wait-verification|mode|focus|close|experience|restore-session|fingerprint|stop|status|profiles> ...");
     process.exit(2);
   }
 
@@ -2615,6 +2700,9 @@ async function main() {
     case "state":
       result = await requestDaemon(info, "/state");
       break;
+    case "focus":
+      result = await requestDaemon(info, "/focus");
+      break;
     case "snapshot":
       result = await requestDaemon(info, "/snapshot", {
         mode: flags.mode || "interactive",
@@ -2663,6 +2751,7 @@ async function main() {
         force: Boolean(flags.force),
         js: Boolean(flags.js),
         allowJs: Boolean(flags["allow-js"]),
+        allowAuth: Boolean(flags["allow-auth"]),
         realOnly: !flags.js,
         waitFor: flags["wait-for"] || "",
         waitForNavigation: Boolean(flags["wait-nav"]),
@@ -2680,6 +2769,7 @@ async function main() {
         type: Boolean(flags.type),
         append: Boolean(flags.append),
         clear: !flags.append,
+        allowAuth: Boolean(flags["allow-auth"]),
         timeout,
       });
       break;
@@ -2687,7 +2777,7 @@ async function main() {
     case "press": {
       const key = positional[0];
       if (!key) throw new Error("press 需要 key");
-      result = await requestDaemon(info, "/press", { key });
+      result = await requestDaemon(info, "/press", { key, allowAuth: Boolean(flags["allow-auth"]) });
       break;
     }
     case "hover": {
@@ -2705,6 +2795,7 @@ async function main() {
         value,
         label: Boolean(flags.label),
         frame: flags.frame || "",
+        allowAuth: Boolean(flags["allow-auth"]),
         timeout,
       });
       break;
