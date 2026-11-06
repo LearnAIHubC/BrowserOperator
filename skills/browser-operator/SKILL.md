@@ -7,6 +7,15 @@ description: "Persistent Chrome automation for real mouse clicks: headless by de
 
 Use this skill for **all** browser click/automation work. Do not write one-off Playwright/CDP scripts, and do not use `el.click()` / DOM events as the default path. The bundled CLI owns a persistent Chrome profile and a local daemon, so login state survives between commands and between sessions.
 
+## 标注入口与持久配置
+
+- 标注按钮是否出现，统一读取 skill 配置 `~/.dsh/browser-operator/config.json` 的 `annotationEnabled` 布尔值；设置 `BROWSER_OPERATOR_HOME` 时，配置位于该目录的 `config.json`。没有配置时默认开启，所有 profile 共用。
+- 开启时，打开、刷新或跳转页面都会自动显示右下角按钮。默认只显示入口，用户点击后按钮立即显示“请选择”，再拖出矩形框；记录后按钮显示“清空标注”。
+- 用户明确说“关闭标注”时，执行 `annotate cancel --profile <profile>`：写入 `annotationEnabled: false` 并移除当前浏览器各标签页的标注。后续页面和浏览器重启后都不再出现入口。
+- 用户明确说“开启标注”“需要标注”时，执行 `annotate start --profile <profile>`：写入 `annotationEnabled: true` 并恢复入口，以后自动显示。不要在普通打开页面或任务收尾时反复运行 start/cancel 覆盖用户的配置。
+- 每个框的右上角 × 单独删除该框；“清空标注”清空所有框并退出绘制，保留按钮，也不改变持久配置。Esc 退出本次绘制。
+- 用户要求查看框选内容时，执行 `annotate read --profile <profile>`，直接读取 DOM 元素、文字、唯一 CSS 选择器、元素边界 `rect` 和中心点 `center`，不截图。坐标为页面可见区域内的 CSS 像素，`coordinateSpace: viewport`。
+
 
 ## 登录与验证：默认交给用户，用户明确授权后才可代操作
 

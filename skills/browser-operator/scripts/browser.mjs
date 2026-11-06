@@ -39,6 +39,7 @@ const SHOTS = join(HOME, "screenshots");
 const EXPERIENCES = join(HOME, "experiences");
 const RECIPES = join(HOME, "脚本");
 const LOGS = join(HOME, "logs");
+const SKILL_CONFIG = join(HOME, "config.json");
 const DEFAULT_PROFILE = "default";
 const DEFAULT_TIMEOUT = 15_000;
 const DEFAULT_SNAPSHOT_CHARS = 30_000;
@@ -51,6 +52,20 @@ function ensureHome() {
   mkdirSync(PROFILES, { recursive: true, mode: 0o700 });
   mkdirSync(SHOTS, { recursive: true, mode: 0o700 });
   mkdirSync(EXPERIENCES, { recursive: true, mode: 0o700 });
+}
+
+function readSkillConfig() {
+  if (!existsSync(SKILL_CONFIG)) return { annotationEnabled: true };
+  const config = JSON.parse(readFileSync(SKILL_CONFIG, "utf8"));
+  if (config.annotationEnabled !== undefined && typeof config.annotationEnabled !== "boolean") {
+    throw fail("bad-config", "skill 配置 annotationEnabled 必须是 true 或 false");
+  }
+  return config;
+}
+
+function setAnnotationEnabled(enabled) {
+  ensureHome();
+  writeJson(SKILL_CONFIG, { ...readSkillConfig(), annotationEnabled: enabled });
 }
 
 function profileDir(profile) {
@@ -648,12 +663,19 @@ async function launchBrowser(profile, headless) {
   const context = await chromium.launchPersistentContext(paths.chrome, {
     headless,
     executablePath,
-    viewport: { width: 1440, height: 900 },
+    // Visible windows must resize with the user so fixed controls stay in view.
+    viewport: headless ? { width: 1440, height: 900 } : null,
     acceptDownloads: true,
     ...(locale ? { locale } : {}),
     ...(timezoneId ? { timezoneId } : {}),
     ignoreHTTPSErrors: true,
     args,
+  });
+  await context.exposeBinding("__browserOperatorAnnotationEnabled", () => readSkillConfig().annotationEnabled !== false);
+  await context.addInitScript({
+    content: `if (window.top === window) window.__browserOperatorAnnotationEnabled().then((enabled) => {
+      if (enabled) (${annotationLauncher.toString()})();
+    });`,
   });
   // Remember the version the running browser reports; it is used as a
   // fallback for platforms where the binary cannot be queried.
@@ -698,6 +720,7 @@ async function launchBrowser(profile, headless) {
   for (const extra of launchedPages) {
     if (extra !== page) await extra.close().catch(() => {});
   }
+  if (readSkillConfig().annotationEnabled !== false) await page.evaluate(annotationLauncher);
   attachDiagnostics(page);
   if (headless) {
     await page.bringToFront().catch(() => {});
@@ -1887,6 +1910,600 @@ async function screenshotAction(body) {
   return { ok: true, action: "screenshot", profile: currentProfile, path: file, bytes: stat.size, url: maskUrl(page.url()) };
 }
 
+// ── annotation: the user boxes a region, the agent reads its elements ──
+
+const ANNOTATION_LAUNCHER_ID = "__browser_operator_annotate_launcher__";
+const ANNOTATION_LAYER_ID = "__browser_operator_annotate__";
+
+/**
+ * Installs a small persistent launcher in the corner of the page. The user clicks
+ * it, drags a rectangle with the real mouse, and the crosshair layer records the
+ * region; `read` returns the underlying elements, selectors and coordinates.
+ *
+ * Shadow DOM and inline styles only: page CSS cannot restyle it and a CSP that
+ * blocks inline <style> does not affect it. The layer covers the viewport with
+ * pointer-events:auto, so the page never sees the drag.
+ */
+function annotationLauncher() {
+  // Installed as an init script too, so it must not run inside sub-frames and must
+  // stay gone after the agent removed it on purpose.
+  if (window.top !== window || window.__browserOperatorAnnotationDisabled) return;
+  // Runs at document-start as an init script, where <html> may not exist yet.
+  if (!document.documentElement) {
+    document.addEventListener("DOMContentLoaded", () => annotationLauncher(), { once: true });
+    return;
+  }
+  const LAYER_ID = "__browser_operator_annotate__";
+  const LAUNCHER_ID = "__browser_operator_annotate_launcher__";
+  window.__browserOperatorAnnotation?.dispose?.();
+  for (const id of [LAUNCHER_ID, LAYER_ID]) document.getElementById(id)?.remove();
+
+  const listeners = new AbortController();
+
+  const api = (window.__browserOperatorAnnotation = {
+    results: [],
+    marks: [],
+    closed: false,
+    drawing: false,
+  });
+  const mount = document.documentElement;
+  const FONT = "font:13px/1.2 -apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC',sans-serif;";
+
+  const launcher = document.createElement("div");
+  launcher.id = LAUNCHER_ID;
+  launcher.style.cssText = "all:initial;position:fixed;right:20px;bottom:20px;z-index:2147483647;pointer-events:none;";
+  const lshadow = launcher.attachShadow({ mode: "open" });
+  const pill = document.createElement("button");
+  pill.type = "button";
+  pill.style.cssText =
+    "pointer-events:auto;display:inline-flex;align-items:center;gap:8px;cursor:pointer;user-select:none;white-space:nowrap;border:0;" +
+    FONT +
+    "font-size:14px;background:#111827;color:#fff;padding:12px 18px;border-radius:999px;" +
+    "box-shadow:0 6px 20px rgba(0,0,0,.28),0 0 0 3px rgba(59,130,246,.35);";
+  const pillLabel = document.createElement("span");
+  pillLabel.textContent = "✎ 圈选标注";
+  const badge = document.createElement("span");
+  badge.style.cssText =
+    "display:none;min-width:18px;text-align:center;background:#3b82f6;border-radius:999px;padding:2px 6px;font-size:11px;font-weight:600;";
+  pill.append(pillLabel, badge);
+  const hint = document.createElement("div");
+  hint.style.cssText =
+    "pointer-events:none;position:absolute;right:0;bottom:58px;width:210px;white-space:normal;" +
+    FONT +
+    "background:#fff;color:#111827;padding:10px 12px;border-radius:10px;border:1px solid #e5e7eb;" +
+    "box-shadow:0 8px 24px rgba(0,0,0,.16);";
+  hint.textContent = "点这个按钮，然后在页面上按住左键，拖出要标注的矩形框。";
+  const bubble = document.createElement("div");
+  bubble.style.cssText = "position:relative;pointer-events:none;";
+  bubble.append(hint, pill);
+  lshadow.append(bubble);
+  mount.append(launcher);
+
+  const MARKS_ID = "__browser_operator_annotate_marks__";
+  document.getElementById(MARKS_ID)?.remove();
+
+  const marksHost = document.createElement("div");
+  marksHost.id = MARKS_ID;
+  marksHost.style.cssText =
+    "all:initial;position:fixed;left:0;top:0;width:100vw;height:100vh;pointer-events:none;z-index:2147483647;";
+  const marksSvg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  marksSvg.style.cssText = "position:fixed;left:0;top:0;width:100vw;height:100vh;pointer-events:none;";
+  const marksButtons = document.createElement("div");
+  marksButtons.style.cssText = "position:fixed;left:0;top:0;width:100vw;height:100vh;pointer-events:none;";
+  const marksShadow = marksHost.attachShadow({ mode: "open" });
+  marksShadow.append(marksSvg, marksButtons);
+  mount.append(marksHost);
+
+  setTimeout(() => hint.remove(), 12000);
+
+  let layer = null;
+  let drawing = false;
+  let points = [];
+
+  const syncBadge = () => {
+    // Count what is on screen (marks), not what is still unread: the user clears
+    // them with the ×, the agent reading them must not make the number jump.
+    const count = api.marks.length;
+    badge.style.display = count ? "inline-block" : "none";
+    badge.textContent = String(count);
+    pillLabel.textContent = count ? "清空标注" : layer ? "请选择" : "✎ 圈选标注";
+    pill.title = count ? "清除全部标注并退出标注模式" : layer ? "请按住左键拖出矩形框" : "开始圈选标注";
+  };
+
+  // Recorded boxes stay on the page until the user clears them, so nothing they
+  // already pointed at silently disappears.
+  const dropMark = (mark) => {
+    const at = api.marks.indexOf(mark);
+    if (at >= 0) api.marks.splice(at, 1);
+    const pending = api.results.indexOf(mark);
+    if (pending >= 0) api.results.splice(pending, 1);
+    renderMarks();
+    syncBadge();
+  };
+
+  const renderMarks = () => {
+    const svgns = "http://www.w3.org/2000/svg";
+    while (marksSvg.firstChild) marksSvg.removeChild(marksSvg.firstChild);
+    while (marksButtons.firstChild) marksButtons.removeChild(marksButtons.firstChild);
+    api.marks.forEach((mark, index) => {
+      const frame = document.createElementNS(svgns, "rect");
+      frame.setAttribute("x", String(mark.x));
+      frame.setAttribute("y", String(mark.y));
+      frame.setAttribute("width", String(mark.width));
+      frame.setAttribute("height", String(mark.height));
+      frame.setAttribute("rx", "6");
+      frame.setAttribute("fill", "rgba(59,130,246,0.10)");
+      frame.setAttribute("stroke", "#3b82f6");
+      frame.setAttribute("stroke-width", "1.5");
+      frame.setAttribute("stroke-dasharray", "6 4");
+      marksSvg.appendChild(frame);
+      const dot = document.createElementNS(svgns, "circle");
+      dot.setAttribute("cx", String(mark.x + 12));
+      dot.setAttribute("cy", String(mark.y + 12));
+      dot.setAttribute("r", "10");
+      dot.setAttribute("fill", "#3b82f6");
+      const label = document.createElementNS(svgns, "text");
+      label.setAttribute("x", String(mark.x + 12));
+      label.setAttribute("y", String(mark.y + 12));
+      label.setAttribute("fill", "#fff");
+      label.setAttribute("font-size", "11");
+      label.setAttribute("font-family", "-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif");
+      label.setAttribute("text-anchor", "middle");
+      label.setAttribute("dominant-baseline", "central");
+      label.textContent = String(index + 1);
+      marksSvg.append(dot, label);
+
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.textContent = "×";
+      remove.title = `删除标注 ${index + 1}`;
+      remove.setAttribute("aria-label", remove.title);
+      remove.style.cssText =
+        `pointer-events:auto;position:absolute;left:${Math.max(0, Math.round(mark.x + mark.width - 9))}px;` +
+        `top:${Math.max(0, Math.round(mark.y - 9))}px;width:20px;height:20px;padding:0;border-radius:50%;` +
+        "border:1px solid #3b82f6;background:#fff;color:#3b82f6;cursor:pointer;" +
+        "font:14px/1 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;box-shadow:0 2px 6px rgba(0,0,0,.2);";
+      remove.addEventListener("pointerdown", (event) => event.stopPropagation());
+      remove.addEventListener("click", (event) => {
+        event.stopPropagation();
+        dropMark(mark);
+      });
+      marksButtons.appendChild(remove);
+    });
+
+  };
+  api.refresh = syncBadge;
+
+  const paintRect = () => {
+    if (!layer || !points.length) return;
+    const [start, end = start] = points;
+    layer.preview.setAttribute("x", String(Math.min(start[0], end[0])));
+    layer.preview.setAttribute("y", String(Math.min(start[1], end[1])));
+    layer.preview.setAttribute("width", String(Math.abs(end[0] - start[0])));
+    layer.preview.setAttribute("height", String(Math.abs(end[1] - start[1])));
+  };
+
+  const closeLayer = () => {
+    layer?.host.remove();
+    layer = null;
+    drawing = false;
+    points = [];
+    api.drawing = false;
+    syncBadge();
+  };
+
+  api.dispose = () => {
+    closeLayer();
+    listeners.abort();
+    launcher.remove();
+    marksHost.remove();
+    api.marks.length = 0;
+    api.results.length = 0;
+  };
+
+  const clearAll = () => {
+    api.marks.length = 0;
+    api.results.length = 0;
+    renderMarks();
+    closeLayer();
+  };
+
+  const openLayer = () => {
+    const host = document.createElement("div");
+    host.id = LAYER_ID;
+    host.style.cssText =
+      "all:initial;position:fixed;left:0;top:0;width:100vw;height:100vh;z-index:2147483646;cursor:crosshair;touch-action:none;";
+    const shadow = host.attachShadow({ mode: "open" });
+
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.style.cssText = "position:fixed;left:0;top:0;width:100vw;height:100vh;pointer-events:none;";
+    const preview = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+    preview.setAttribute("fill", "rgba(59,130,246,0.10)");
+    preview.setAttribute("stroke", "#3b82f6");
+    preview.setAttribute("stroke-width", "1.5");
+    preview.setAttribute("stroke-dasharray", "6 4");
+    preview.setAttribute("rx", "6");
+    svg.append(preview);
+    shadow.append(svg);
+    (document.body || mount).append(host);
+
+    layer = { host, preview };
+    api.drawing = true;
+    api.closed = false;
+    syncBadge();
+  };
+
+  pill.addEventListener("pointerdown", (event) => event.stopPropagation());
+  pill.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (api.marks.length) clearAll();
+    else if (layer) closeLayer();
+    else openLayer();
+  });
+
+  // One set of window-level listeners for the lifetime of the launcher: a page
+  // handler on document capture would otherwise be able to swallow the drag.
+  window.addEventListener(
+    "pointerdown",
+    (event) => {
+      if (!layer || event.button !== 0 || event.composedPath()[0] !== layer.host) return;
+      event.preventDefault();
+      event.stopPropagation();
+      drawing = true;
+      points = [[event.clientX, event.clientY]];
+      try {
+        layer.host.setPointerCapture(event.pointerId);
+      } catch {}
+      paintRect();
+    },
+    { capture: true, signal: listeners.signal },
+  );
+
+  window.addEventListener(
+    "pointermove",
+    (event) => {
+      if (!drawing) return;
+      event.preventDefault();
+      event.stopPropagation();
+      points[1] = [event.clientX, event.clientY];
+      paintRect();
+    },
+    { capture: true, signal: listeners.signal },
+  );
+
+  window.addEventListener(
+    "pointerup",
+    (event) => {
+      if (!drawing || !layer) return;
+      drawing = false;
+      event.preventDefault();
+      event.stopPropagation();
+      points[1] = [event.clientX, event.clientY];
+      layer.preview.setAttribute("width", "0");
+      layer.preview.setAttribute("height", "0");
+      const xs = points.map((p) => p[0]);
+      const ys = points.map((p) => p[1]);
+      let left = Math.min(...xs);
+      let top = Math.min(...ys);
+      let right = Math.max(...xs);
+      let bottom = Math.max(...ys);
+      left = Math.max(0, left);
+      top = Math.max(0, top);
+      right = Math.min(window.innerWidth, right);
+      bottom = Math.min(window.innerHeight, bottom);
+      if (right - left < 4 || bottom - top < 4) return;
+
+      api.results.push({
+        x: Math.round(left),
+        y: Math.round(top),
+        width: Math.round(right - left),
+        height: Math.round(bottom - top),
+        scroll: { x: window.scrollX, y: window.scrollY },
+        viewport: { width: window.innerWidth, height: window.innerHeight },
+        devicePixelRatio: window.devicePixelRatio,
+        at: Date.now(),
+      });
+      const mark = api.results[api.results.length - 1];
+      api.marks.push(mark);
+      renderMarks();
+      syncBadge();
+    },
+    { capture: true, signal: listeners.signal },
+  );
+
+  window.addEventListener(
+    "keydown",
+    (event) => {
+      if (!layer || event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      closeLayer();
+    },
+    { capture: true, signal: listeners.signal },
+  );
+}
+
+/** Resolve a drawn region into concrete elements the agent can act on. */
+function pickRegion({ rect, maxElements = 6 }) {
+  const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
+  const cssEscape = (value) =>
+    typeof CSS !== "undefined" && CSS.escape ? CSS.escape(value) : String(value).replace(/[^a-zA-Z0-9_-]/g, (ch) => `\\${ch}`);
+  const unique = (candidate) => {
+    try {
+      return document.querySelectorAll(candidate).length === 1;
+    } catch {
+      return false;
+    }
+  };
+  const suggest = (el) => {
+    const tag = el.tagName.toLowerCase();
+    if (el.id && unique(`#${cssEscape(el.id)}`)) return `#${cssEscape(el.id)}`;
+    for (const attr of ["data-testid", "data-test", "name", "aria-label", "placeholder", "title"]) {
+      const value = el.getAttribute(attr);
+      if (!value) continue;
+      const candidate = `${tag}[${attr}="${String(value).replace(/"/g, '\\"')}"]`;
+      if (unique(candidate)) return candidate;
+    }
+    const parts = [];
+    let current = el;
+    while (current && current.nodeType === 1 && current !== document.body) {
+      const currentTag = current.tagName.toLowerCase();
+      if (current.id && unique(`#${cssEscape(current.id)}`)) {
+        parts.unshift(`#${cssEscape(current.id)}`);
+        break;
+      }
+      let part = currentTag;
+      const parent = current.parentElement;
+      if (parent) {
+        const siblings = Array.from(parent.children).filter((child) => child.tagName === current.tagName);
+        if (siblings.length > 1) part += `:nth-of-type(${siblings.indexOf(current) + 1})`;
+      }
+      parts.unshift(part);
+      const candidate = parts.join(" > ");
+      if (unique(candidate)) return candidate;
+      current = parent;
+    }
+    return parts.join(" > ") || tag;
+  };
+
+  const skip = (el) =>
+    !el || el.nodeType !== 1 || el.id.startsWith("__browser_operator_annotate") || el.tagName === "HTML" || el.tagName === "BODY";
+  const describe = (el) => {
+    const tag = el.tagName.toLowerCase();
+    const bounds = el.getBoundingClientRect();
+    const role = el.getAttribute("role") || "";
+    const name = el.getAttribute("aria-label") || el.getAttribute("alt") || el.getAttribute("title") || "";
+    return {
+      tag,
+      selector: suggest(el),
+      role: role || undefined,
+      name: name ? normalize(name).slice(0, 80) : undefined,
+      text: normalize(el.innerText ?? el.value ?? "").slice(0, 200),
+      rect: {
+        x: Math.round(bounds.x),
+        y: Math.round(bounds.y),
+        width: Math.round(bounds.width),
+        height: Math.round(bounds.height),
+      },
+      center: {
+        x: Math.round(bounds.left + bounds.width / 2),
+        y: Math.round(bounds.top + bounds.height / 2),
+      },
+      interactive: ["a", "button", "input", "select", "textarea", "label", "summary"].includes(tag) || Boolean(role),
+    };
+  };
+
+  // Sample a grid, not just the center: a box around a card usually has its
+  // center on a child, while the card itself is what the user means.
+  const cols = 5;
+  const rows = 4;
+  const points = [];
+  for (let col = 0; col < cols; col++) {
+    for (let row = 0; row < rows; row++) {
+      points.push([rect.x + (rect.width * (col + 0.5)) / cols, rect.y + (rect.height * (row + 0.5)) / rows]);
+    }
+  }
+  points.push([rect.x + rect.width / 2, rect.y + rect.height / 2]);
+
+  // Vote over every element under each sample point, not just the topmost one:
+  // the card the user selected is an ancestor of whatever pixel is on top there.
+  const regionArea = Math.max(1, rect.width * rect.height);
+  const votes = new Map();
+  let iframe = false;
+  for (const [px, py] of points) {
+    const x = Math.min(window.innerWidth - 1, Math.max(0, px));
+    const y = Math.min(window.innerHeight - 1, Math.max(0, py));
+    const stack = document.elementsFromPoint(x, y);
+    if (stack.some((el) => el && el.tagName === "IFRAME")) iframe = true;
+    for (const el of stack) {
+      if (skip(el)) continue;
+      votes.set(el, (votes.get(el) || 0) + 1);
+    }
+  }
+
+  // Rank: a block that sits fully inside the drawn box beats a page wrapper that
+  // merely covers it; then most sample points; then the more enclosing one.
+  const areaOf = (el) => {
+    const b = el.getBoundingClientRect();
+    return Math.max(1, b.width * b.height);
+  };
+  const candidates = [...votes.entries()].map(([el, count]) => {
+    const bounds = el.getBoundingClientRect();
+    const enclosed =
+      bounds.left >= rect.x - 2 &&
+      bounds.top >= rect.y - 2 &&
+      bounds.right <= rect.x + rect.width + 2 &&
+      bounds.bottom <= rect.y + rect.height + 2;
+    const oversized = areaOf(el) > regionArea * 4;
+    return {
+      el,
+      count,
+      rank: oversized ? 2 : enclosed ? 0 : 1,
+      entry: { ...describe(el), votes: count, coverage: Math.round((count / points.length) * 100) / 100, enclosed },
+    };
+  });
+  candidates.sort((a, b) => {
+    if (a.rank !== b.rank) return a.rank - b.rank;
+    if (b.count !== a.count) return b.count - a.count;
+    return areaOf(b.el) - areaOf(a.el);
+  });
+  const ranked = candidates.slice(0, maxElements).map((item) => item.entry);
+
+  const dominant = ranked[0] || null;
+  const ancestors = [];
+  let parent = candidates[0]?.el.parentElement || null;
+  for (let depth = 0; parent && depth < 3 && parent !== document.body; depth++) {
+    ancestors.push({ tag: parent.tagName.toLowerCase(), selector: suggest(parent), text: normalize(parent.innerText || "").slice(0, 80) });
+    parent = parent.parentElement;
+  }
+
+  return {
+    iframe,
+    dominant,
+    elements: ranked,
+    ancestors,
+    text: dominant ? normalize(dominant.text).slice(0, 400) : "",
+  };
+}
+
+/** Install the launcher; returns immediately so the user can draw whenever. */
+async function annotateStart() {
+  setAnnotationEnabled(true);
+  let switchedToHeaded = false;
+  if (currentHeadless) {
+    await switchModeAction({ mode: "headed", preserveUrl: true });
+    switchedToHeaded = true;
+  }
+  const page = getPage();
+  for (const candidate of context.pages()) {
+    await candidate.evaluate(() => { window.__browserOperatorAnnotationDisabled = false; });
+    const present = await candidate.evaluate(() => Boolean(document.getElementById("__browser_operator_annotate_launcher__")));
+    if (!present) await candidate.evaluate(annotationLauncher);
+  }
+  return {
+    ok: true,
+    action: "annotate",
+    mode: "start",
+    enabled: true,
+    profile: currentProfile,
+    switchedToHeaded,
+    url: maskUrl(page.url()),
+    title: await page.title().catch(() => ""),
+    launcher: "右下角「✎ 圈选标注」",
+    hint: "用户点右下角按钮后拖出矩形框；框选后用 browser annotate read 取结果",
+  };
+}
+
+async function annotateRead() {
+  const page = getPage();
+  const state = await page
+    .evaluate(() => {
+      const api = window.__browserOperatorAnnotation;
+      const present = Boolean(document.getElementById("__browser_operator_annotate_launcher__"));
+      return {
+        present,
+        closed: Boolean(api && api.closed),
+        drawing: Boolean(api && api.drawing),
+        results: api ? api.results.slice() : [],
+      };
+    })
+    .catch(() => ({ present: false, closed: false, drawing: false, results: [] }));
+
+  const base = { ok: true, action: "annotate", mode: "read", profile: currentProfile, active: state.present, coordinateSpace: "viewport" };
+
+  if (!state.results.length) {
+    if (!state.present) {
+      return {
+        ...base,
+        results: [],
+        hint: state.closed
+          ? "用户已点「完成」结束标注，但没有留下圈选结果；重新 annotate start 可再开一个入口"
+          : "浮层不在页面上（页面跳转过，或标注入口被移除），重新 annotate start",
+      };
+    }
+    return { ...base, results: [], pending: true, hint: "入口还在，用户还没画" };
+  }
+
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const dir = join(HOME, "annotations");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const results = [];
+
+  for (const item of state.results) {
+    const rect = { x: item.x, y: item.y, width: item.width, height: item.height };
+    const region = await page.evaluate(pickRegion, { rect }).catch((error) => ({ error: firstLine(error?.message || error) }));
+
+    results.push({
+      region: { ...rect, scroll: item.scroll, viewport: item.viewport, devicePixelRatio: item.devicePixelRatio },
+      dominant: region.dominant || null,
+      elements: region.elements || [],
+      ancestors: region.ancestors || [],
+      text: region.text || "",
+      insideFrame: Boolean(region.iframe),
+      ...(region.error ? { error: region.error } : {}),
+    });
+  }
+
+  await page
+    .evaluate(() => {
+      const api = window.__browserOperatorAnnotation;
+      if (!api) return;
+      api.results.length = 0;
+      api.refresh?.();
+    })
+    .catch(() => {});
+
+  const record = join(dir, `${currentProfile}-${stamp}.json`);
+  const result = {
+    ...base,
+    url: maskUrl(page.url()),
+    title: await page.title().catch(() => ""),
+    count: results.length,
+    results,
+    record,
+  };
+  writeJson(record, result);
+  return result;
+}
+
+/** Blocking variant: wait for the first circle, then read it. */
+async function annotateWait(body = {}) {
+  const timeout = Math.max(5_000, Number(body.timeout) || 150_000);
+  await annotateStart();
+  const page = getPage();
+  try {
+    await page.waitForFunction(
+      () => {
+        const api = window.__browserOperatorAnnotation;
+        return Boolean(api && api.results.length);
+      },
+      undefined,
+      { timeout, polling: 200 },
+    );
+  } catch {
+    throw fail("annotate-timeout", `等不到圈选结果（${Math.round(timeout / 1000)}s）。用户没有画，或者页面跳转把入口清掉了。`);
+  }
+  return annotateRead();
+}
+
+async function annotateCancel() {
+  setAnnotationEnabled(false);
+  await Promise.all(context.pages().map((page) => page.evaluate(() => {
+    window.__browserOperatorAnnotationDisabled = true;
+    window.__browserOperatorAnnotation?.dispose?.();
+  }).catch(() => {})));
+  return { ok: true, action: "annotate", mode: "cancel", enabled: false, profile: currentProfile, removed: true };
+}
+
+async function annotateAction(body = {}) {
+  const mode = String(body.mode || "start").toLowerCase();
+  if (mode === "start") return annotateStart();
+  if (mode === "read") return annotateRead();
+  if (mode === "wait") return annotateWait(body);
+  if (mode === "cancel") return annotateCancel();
+  throw fail("bad-mode", "annotate 的 mode 必须是 start / read / wait / cancel");
+}
+
 function bindContext(ctx) {
   const serial = ++contextSerial;
   ctx.on("page", (page) => {
@@ -2980,6 +3597,7 @@ async function runDaemon(flags) {
           case "/hover": result = await hoverAction(body); break;
           case "/select": result = await selectAction(body); break;
           case "/wait": result = await waitAction(body); break;
+          case "/annotate": result = await annotateAction(body); break;
           case "/screenshot": result = await screenshotAction(body); break;
           case "/switch": result = await switchAction(body); break;
           case "/close": result = await closeAction(); break;
@@ -3144,6 +3762,7 @@ function parseArgs(argv) {
     "html",
     "all-attrs",
     "dry-run",
+    "no-focus",
   ]);
   for (let index = 0; index < argv.length; index++) {
     const arg = argv[index];
@@ -3194,7 +3813,7 @@ async function main() {
 
   const command = positional.shift();
   if (!command) {
-    console.error("用法: browser <open|state|snapshot|query|click|eval|drag|fill|press|hover|select|wait|screenshot|switch|wait-login|console|network|debug|wait-verification|mode|focus|close|experience|recipe|log|restore-session|fingerprint|stop|status|profiles> ...");
+    console.error("用法: browser <open|state|snapshot|query|click|eval|drag|fill|press|hover|select|wait|screenshot|annotate|switch|wait-login|console|network|debug|wait-verification|mode|focus|close|experience|recipe|log|restore-session|fingerprint|stop|status|profiles> ...");
     process.exit(2);
   }
 
@@ -3495,6 +4114,17 @@ async function main() {
         frame: flags.frame || "",
         timeout,
       });
+      break;
+    }
+    case "annotate":
+    case "mark": {
+      const mode = positional[0] || "start";
+      if (!["start", "read", "wait", "cancel"].includes(mode)) {
+        throw new Error("annotate 需要 start | read | wait | cancel");
+      }
+      result = await requestDaemon(info, "/annotate", { mode, timeout: numberFlag(flags.timeout, 150_000) });
+      // A launcher the user cannot see is useless: bring Chrome forward unless told not to.
+      if (mode !== "cancel" && !flags["no-focus"]) await requestDaemon(info, "/focus").catch(() => {});
       break;
     }
     case "screenshot": {
