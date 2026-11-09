@@ -1,51 +1,51 @@
 ---
 name: browser-operator
-description: "Persistent Chrome automation for real mouse clicks: headless by default, with dynamic headed switching when the user must log in or complete verification. Manual-auth policy: by default the user performs login and verification in the visible browser; the agent types credentials or clicks login only when the user explicitly asks for it in the conversation, and then must pass --allow-auth. Sliders/CAPTCHA are never solved by the agent. Use for opening sites, reusing existing sessions, snapshots, clicks, hover, forms, iframes, screenshots, console/network debugging. Dialogs default to cancel; confirm explicitly. It reads a saved per-site experience before exploring and writes a reusable experience md after a successful run. It also keeps repeatable per-site task recipes under 脚本/ with {{placeholders}} and replays them with recipe run. Profiles keep cookies/localStorage. Triggers include 浏览器点击, 打开网站, 登录网站, 保存登录, 保持登录, 帮我登录, 操作脚本, 一键执行, real click, browser automation."
+description: "Automate Chrome with real mouse input and profiles that keep cookies/localStorage. Runs headless by default and switches to a visible window when login or verification is needed. The user handles login unless they explicitly ask the agent to do it in the conversation; the agent must then use --allow-auth. The user always completes sliders/CAPTCHAs. Use for opening sites, reusing sessions, snapshots, clicks, hover, forms, iframes, screenshots, and console/network debugging. Dialogs default to cancel; accepting requires an explicit command. Read saved site notes before exploring and update the Markdown notes after a successful run. Save reusable task recipes under 脚本/ with {{placeholders}} and replay them with recipe run. Triggers include 浏览器点击, 打开网站, 登录网站, 保存登录, 保持登录, 帮我登录, 操作脚本, 一键执行, real click, browser automation."
 ---
 
 # Browser Operator
 
-Use this skill for **all** browser click/automation work. Do not write one-off Playwright/CDP scripts, and do not use `el.click()` / DOM events as the default path. The bundled CLI owns a persistent Chrome profile and a local daemon, so login state survives between commands and between sessions.
+Use this skill for all browser clicks and automation. Use the bundled CLI instead of writing separate Playwright/CDP scripts; do not use `el.click()` or DOM events as the default. The CLI manages a persistent Chrome profile and a local background process (daemon). Login state can be reused across commands and sessions while the cookies and server-side session remain valid.
 
-## 标注入口与持久配置
+## 页面标注与配置
 
-- 标注按钮是否出现，统一读取 skill 配置 `~/.dsh/browser-operator/config.json` 的 `annotationEnabled` 布尔值；设置 `BROWSER_OPERATOR_HOME` 时，配置位于该目录的 `config.json`。没有配置时默认开启，所有 profile 共用。
-- 开启时，打开、刷新或跳转页面都会自动显示右下角按钮。默认只显示入口，用户点击后按钮立即显示“请选择”，再拖出矩形框；记录后按钮显示“清空标注”。
-- 用户明确说“关闭标注”时，执行 `annotate cancel --profile <profile>`：写入 `annotationEnabled: false` 并移除当前浏览器各标签页的标注。后续页面和浏览器重启后都不再出现入口。
-- 用户明确说“开启标注”“需要标注”时，执行 `annotate start --profile <profile>`：写入 `annotationEnabled: true` 并恢复入口，以后自动显示。不要在普通打开页面或任务收尾时反复运行 start/cancel 覆盖用户的配置。
-- 每个框的右上角 × 单独删除该框；“清空标注”清空所有框并退出绘制，保留按钮，也不改变持久配置。Esc 退出本次绘制。
-- 用户要求查看框选内容时，执行 `annotate read --profile <profile>`，直接读取 DOM 元素、文字、唯一 CSS 选择器、元素边界 `rect` 和中心点 `center`，不截图。坐标为页面可见区域内的 CSS 像素，`coordinateSpace: viewport`。
+- `~/.dsh/browser-operator/config.json` 中的 `annotationEnabled` 布尔值决定是否显示标注按钮。设置了 `BROWSER_OPERATOR_HOME` 时，读取该目录下的 `config.json`。没有配置时默认开启，所有 Profile 共用这个设置。
+- 开启后，打开、刷新或跳转页面时，右下角都会显示标注按钮。用户点击后，按钮变为“请选择”，此时可以拖出矩形框；记录标注后，按钮变为“清空标注”。
+- 用户明确说“关闭标注”时，执行 `annotate cancel --profile <profile>`，将配置保存为 `annotationEnabled: false`，并移除当前浏览器各标签页的标注。以后打开页面或重启浏览器，都不再显示标注入口。
+- 用户明确说“开启标注”或“需要标注”时，执行 `annotate start --profile <profile>`，将配置保存为 `annotationEnabled: true`，恢复标注入口。平时打开页面或结束任务时，不要反复执行 start/cancel，以免覆盖用户的设置。
+- 点击框右上角的 × 只删除该框；“清空标注”会清空所有框并退出绘制，按钮仍保留，配置也不变。按 Esc 可以退出本次绘制。
+- 用户要求查看框选内容时，执行 `annotate read --profile <profile>`，直接读取 DOM 元素、文字、唯一 CSS 选择器、元素边界 `rect` 和中心点 `center`，不需要截图。坐标以页面可见区域为基准，单位是 CSS 像素，返回值为 `coordinateSpace: viewport`。
 
 
-## 登录与验证：默认交给用户，用户明确授权后才可代操作
+## 登录与验证
 
-**默认行为（用户没明确让你登录时）**——登录和验证一律由用户在可见浏览器完成：
+默认由用户在可见的浏览器窗口中完成登录和验证。用户没有明确要求代登录时，遵守以下规则：
 
-- **不要**输入用户名、密码、手机号、OTP 或任何凭据。
-- **不要**点击 登录 / 注册 / 登录/注册 / 发送验证码 / 扫码登录 / Sign in / Log in / Continue with ...，也不要提交登录表单。
-- **不要**解决或交互滑块、CAPTCHA、「访问验证」「滑动验证」「人机验证」，也不要重试它们。
-- agent 只负责：打开页面、报告 `login.likely` / `challenge.likely` / `manualAuth`、按需切到 headed、用 `wait-login` / `wait-verification` 轮询。
-- `manualAuth.required` 为 true 时，`click` / `drag` / `eval` / `fill` / `press` / `select` 默认会以 `manual-auth-required` 失败。此时用 `snapshot`、`query`、`console`、`network`、`screenshot`、`debug` 观察，并请用户在可见窗口完成。
+- 不输入用户名、密码、手机号、OTP 或其他凭据。
+- 不点击“登录”“注册”“登录/注册”“发送验证码”“扫码登录”、Sign in、Log in、Continue with ... 等入口，也不提交登录表单。
+- 不操作或重试滑块、CAPTCHA、“访问验证”“滑动验证”“人机验证”。
+- Agent 负责打开页面，报告 `login.likely`、`challenge.likely` 和 `manualAuth` 的结果，按需切到可见窗口模式（headed），再用 `wait-login` 或 `wait-verification` 等待。
+- `manualAuth.required` 为 true 时，`click` / `drag` / `eval` / `fill` / `press` / `select` 默认返回 `manual-auth-required`。此时可以用 `snapshot`、`query`、`console`、`network`、`screenshot`、`debug` 查看页面，请用户在可见窗口中完成登录或验证。
 
-**例外：用户明确要求由你登录时才有输入权**——仅当用户在本次对话里直接说「你帮我输入账号密码登录」「用这组账号登进去」「帮我点登录」这类明确指令时：
+只有用户在当前对话中明确说“你帮我输入账号密码登录”“用这组账号登进去”“帮我点登录”等指令时，Agent 才能代为登录：
 
-- 才对登录页执行 `fill` / `click` / `press`，并且**必须**加 `--allow-auth`：
+- 对登录页执行 `fill` / `click` / `press` 时，必须加 `--allow-auth`：
   ```bash
   "$BROWSER" fill "#username" "<用户提供的账号>" --allow-auth --profile mysite
   "$BROWSER" fill "#password" "<用户提供的密码>" --allow-auth --profile mysite
   "$BROWSER" click "#btnLoginNow" --allow-auth --profile mysite --wait-nav
   ```
-- 只用用户在对话里给出的凭据；不要从文件、历史记录、其他站点猜测或复用。
-- 不要把凭据写进经验文件、日志、截图说明或最终答复；结果只描述成功/失败。
-- `--allow-auth` 只对 `manualAuth.kind === "login"` 生效。页面出现滑块/CAPTCHA（`kind: "verification"`）时仍会被拦截，必须由用户完成。
-- 用户只是说「打开看看」「试试看」，没有明确要你代登录时，走默认行为，不要自行升级成代登录。
+- 只使用用户在对话中提供的凭据，不从文件、历史记录或其他站点查找、猜测或复用。
+- 不把凭据写进经验文件、日志、截图说明或最终答复；只说明登录是否成功。
+- `--allow-auth` 仅对 `manualAuth.kind === "login"` 生效。滑块或 CAPTCHA（`kind: "verification"`）仍会被拦截，必须由用户完成。
+- “打开看看”“试试看”不代表授权代登录，仍按默认方式处理。
 
-**任何情况下都不要**用 `--js`、`--force`、直接 DOM 调用或其他脚本去绕过登录/验证拦截。
+任何情况下，都不能用 `--js`、`--force`、直接调用 DOM 或其他脚本绕过登录和验证拦截。
 
 
-## 经验记忆（强制，先读后写）
+## 站点经验：任务前读取，探索成功后更新
 
-这个 skill 不只是浏览器，还要把每次探索沉淀成可复用的经验，避免新会话重新摸索。
+每次探索成功后，都要保存入口、选择器和操作方法，让下一个会话能继续使用。
 
 **固定位置**：`~/.dsh/browser-operator/experiences/<canonical-domain>.md`
 （例如 `www.baidu.com` → `baidu.com.md`；子域名保留，只去掉开头的 `www.`）
@@ -56,58 +56,55 @@ Use this skill for **all** browser click/automation work. Do not write one-off P
 "$BROWSER" experience show <domain-or-url>
 ```
 
-- `found:true`：先按 `content` 里的“快速路径/选择器/陷阱”执行，不要从头探索。
-- `found:false`：先看返回的 `related`。如果有同 `app` 或同域归一化的其他环境经验（dev/sit/uat/prod），先读最接近的环境并只复用结构，URL、账号、机构代号、数据对象 OID 等环境值必须重新确认；没有 `related` 才从头探索。
-- `related` 里的 `match` 是 `app`（同应用）、`alias`（别名）或 `normalized-domain`（去掉 dev/sit/uat/prod 等环境词后同域）。
-- 如果 `open` 后发生重定向（例如 127.0.0.1 → localhost、http → https、裸域 → www），用 `experience current` 按最终 `state.url` 的 host 再查一次；localhost/127.0.0.1 建议两个都查。
+- `found:true`：先按 `content` 里的“快速路径”“选择器”和“陷阱”操作，不要从头探索。
+- `found:false`：先检查返回的 `related`。如果有同一应用或相似域名在其他环境（dev/sit/uat/prod）的经验，先读最接近的那份。可以参考页面结构，但 URL、账号、机构代号、数据对象 OID 等必须按当前环境重新确认。没有相关经验时，再从头探索。
+- `related` 中的 `match` 说明匹配原因：`app` 表示同一应用，`alias` 表示域名别名，`normalized-domain` 表示去掉 dev/sit/uat/prod 等环境词后域名相同。
+- 如果 `open` 后发生重定向，例如 127.0.0.1 → localhost、http → https、裸域 → www，用 `experience current` 按最终 `state.url` 中的主机名再查一次。localhost 和 127.0.0.1 建议都查。
 - 经验过期或页面改版：更新文件，并用 `log add` 记录变化。
 
-**探索成功后必须写/更新经验**（用 `write` 工具写文件，不要只留在对话里）：
+**探索成功后，必须用文件写入工具保存或更新经验**，不能只留在对话中：
 
 - 先读模板：`references/experience-template.md`
 - 写入固定路径：`~/.dsh/browser-operator/experiences/<domain>.md`
 - 必须包含 YAML frontmatter：`site`、`domain`、`updated`、`confidence`
-- 同一应用有多个环境/域名时，建议加 `app`、`environment`、`aliases`：
-  - `app`：跨环境稳定的应用键（如 `my-admin`），不要带环境名
+- 同一应用有多个环境或域名时，建议加 `app`、`environment`、`aliases`：
+  - `app`：各环境共用的应用标识，如 `my-admin`，不要带环境名
   - `environment`：`local|dev|sit|test|stage|uat|prod|other`
   - `aliases`：同应用的其他域名（含 `127.0.0.1` 这类别名）
 - 必须包含章节：`## 快速路径`、`## 选择器`、`## 结果读取`、`## 陷阱`、`## 空页面/异常兜底`、`## 验证记录`
-- 写“下一个会话能直接照做”的信息：入口 URL 模板、搜索框/按钮选择器、结果条目选择器、按第 N 个结果点击的规则、详情读取方式、广告/懒加载/新标签页等陷阱。
-- 不写 cookies、token、密码、手机号、完整个人数据；只写站点结构和选择器。
+- 写清下一个会话需要的信息：入口 URL 模板、搜索框和按钮的选择器、结果条目选择器、第 N 个结果的点击规则、详情读取方式，以及广告、懒加载、新标签页等需要注意的情况。
+- 只记录站点结构和选择器，不写 Cookie、token、密码、手机号或完整个人数据。
 - 写完用 `"$BROWSER" experience validate <domain>` 校验格式。
 - 查询同应用其他环境：`"$BROWSER" experience related <domain>`；`experience show` / `experience current` 也会返回 `related` 列表。
 
-**任务收尾检查（强制，给最终答复前）**：
+**给最终答复前，必须完成以下检查**：
 
 1. 再执行一次 `"$BROWSER" experience show <domain>`；如果本次页面发生过重定向，用 `"$BROWSER" experience current` 以最终 host 复查。
-2. 对照本次操作，确认是否出现新的入口 URL、选择器、结果读取方式、失败兜底或陷阱。
+2. 对照本次操作，检查入口 URL、选择器、结果读取方式、失败后的处理方法和注意事项是否有变化。
 3. 有新增/变化：更新经验文件，再执行 `experience validate <domain>`。
-4. 无论有没有变化，都用日志命令记一条本次运行：`"$BROWSER" log add <domain> "<任务>" --result ok|failed|partial --note "<结果/备注>"`（无新增也记 `ok` + “无新增”，证明已检查）。
-5. 未完成以上检查，不得给最终答复。
+4. 无论经验有没有变化，都要记录本次运行：`"$BROWSER" log add <domain> "<任务>" --result ok|failed|partial --note "<结果/备注>"`。按实际结果填写 `--result`；任务成功且没有新发现时，记 `ok`，备注写“无新增”。
 
-这一步是硬性收尾条件。经验文件的价值在于“下一次只看 md 就能照做”，不记录等于本次探索白做。
+**验证标准**：新会话不依赖旧对话，只读经验文件，就能用少量命令完成同类任务。验证结果也要写入日志。
 
-**新会话验证标准**：不依赖旧对话，只读这份 md，就能在少量命令内完成同类任务。验证后再把结果记进日志。
+## 验证日志
 
-## 验证日志（logs/<domain>/log.md，固定格式）
-
-验证记录不再堆在经验文件里，按域名独立存放，一个域名一个文件夹：
+每个域名的验证记录单独存放，不追加到经验文件中：
 
 - **位置**：`~/.dsh/browser-operator/logs/<canonical-domain>/log.md`
 - **固定格式**（一行一次，只追加、不改历史行）：
   `- YYYY-MM-DD HH:mm | 任务 | 结果(ok|failed|partial) | 备注`
 - **追加**：`"$BROWSER" log add <domain> "<任务>" --result ok|failed|partial --note "<备注>"`
 - **查看**：`"$BROWSER" log show <domain> [--limit N]`；全部域名：`"$BROWSER" log list`
-- 经验文件的 `## 验证记录` 只保留日志路径指针。迁移旧经验时，先将原表格/条目原样保存在日志的 `## 历史记录（经验迁移 …）` 下，再替换经验中的旧记录；CLI 不会自动迁移历史内容。
-- 不要手工改格式；`log add` 会生成合法行，`log show` 只解析这个格式。
+- 经验文件的 `## 验证记录` 只保留日志路径。迁移旧经验时，先把原表格或条目原样保存到日志的 `## 历史记录（经验迁移 …）` 下，再将经验中的旧记录替换为日志路径。CLI 不会自动迁移历史内容。
+- 使用 `log add` 生成记录，不要手工改格式；`log show` 只能解析上述格式。
 
-## 操作脚本（recipe：同一任务第 3 次开始录制）
+## 操作脚本（recipe）
 
-经验记录“怎么做”，脚本记录“可以一键重放的那几步”。同一域名、同一任务做过 2 次（`次数: 2`），第 3 次仍稳定时，把它固化成脚本；之后优先 `recipe run`，失败再交回 LLM 手动接管并修正。
+经验文件说明站点结构和操作方法，脚本保存可以重复执行的步骤。同一域名、同一任务已成功执行 2 次（`次数: 2`），第 3 次仍成功时，把步骤写成脚本。以后优先用 `recipe run` 执行，失败后由 Agent 在当前页面继续操作并修正脚本。
 
 **固定位置**：`~/.dsh/browser-operator/脚本/<canonical-domain>.md`（与 `experiences/` 同层级；去掉开头 `www.`，子域名保留）
 
-一个域名一个 Markdown 文件，frontmatter 与经验一致（`site`/`domain`/`app`/`environment`/`updated`，可选 `profile`）。每个任务一个 `##` 段落：
+每个域名保存一份 Markdown。文件开头的 YAML 信息（frontmatter）与经验文件一致，包含 `site`、`domain`、`app`、`environment`、`updated`，可选 `profile`。每个任务用一个 `##` 小节：
 
 ````markdown
 ## 搜索并读取结果
@@ -127,29 +124,29 @@ query "#content_left"
 规则：
 
 - `steps` 每行一个 `browser` 子命令（不写 `browser` 前缀），支持 `open/goto/state/fill/click/press/select/hover/wait/query/snapshot/screenshot/switch/close/mode/focus/console/network/debug/eval/drag` 等；`stop/status/recipe/experience/profiles` 不允许。
-- 动态内容一律 `{{name}}` 占位，`- 参数:` 行声明 `name=说明`，运行时 `--var name=value`。**不要**把真实账号、密码、token、OTP、证件号写进文件或参数说明。
-- **不要**在 steps 里写 `--allow-auth`；只有用户本次明确要求代登录时，才在 `recipe run` 命令上加 `--allow-auth`（脚本文件本身永不保存该授权）。滑块/CAPTCHA 仍必须由用户完成。
-- `--profile` 只需写在第一个 `open` 步骤或 frontmatter，`recipe run` 会注入后续步骤；单步也可自己覆盖。
-- 成功的点击后补 `wait` 或 `--wait-nav`；读结果用 `query`/`snapshot`；避免 `--js`（除非用户明确要求）。
+- 动态内容用 `{{name}}` 占位，在 `- 参数:` 行用 `name=说明` 声明，运行时通过 `--var name=value` 传入。不要把真实账号、密码、token、OTP、证件号写进文件或参数说明。
+- 不在 `steps` 中保存 `--allow-auth`。只有用户在当前对话明确要求代登录时，才在 `recipe run` 命令上加这个参数；脚本文件不保存授权。滑块和 CAPTCHA 仍由用户完成。
+- `--profile` 可以写在第一个 `open` 步骤或 frontmatter 中，`recipe run` 会将它传给后续步骤；单个步骤也可以指定其他 Profile。
+- 点击成功后，用 `wait` 或 `--wait-nav` 等待页面变化，再用 `query` 或 `snapshot` 读取结果。除非用户明确要求，否则避免使用 `--js`。
 
 **流程**：
 
-1. 任务开始：先 `"$BROWSER" recipe show <domain> "<任务>"`；`recorded:true` 就直接 `"$BROWSER" recipe run <domain> "<任务>" --var name=value`。
-2. 没有脚本：照常手动操作；文件或任务段落不存在时，先按 `references/recipe-template.md` 创建，尚无稳定步骤时不保留示例 steps。
-3. `recipe run` 返回 `ok:false`：看 `failedStep` + 该步 `error` + `screenshot`；页面保留现场，直接用同一 profile 接管手动完成（不要重开页面）。成功后修正 steps（选择器/等待/参数），再跑一次；连续两次失败就删掉 steps 或降级为纯提示，避免误导。
-4. 本次任务成功后，只执行一次 `"$BROWSER" recipe log <domain> "<任务>"` 累计次数。返回 `count>=3` 且还没 steps 时，把稳定步骤写成 `steps` 代码块，再 `recipe run` 验证。
-5. 收尾：用 `log add` 记录实际结果，并注明脚本可用/已修正。`recipe run` 不会自动累计次数、追加验证日志或生成/修正脚本。
+1. 任务开始时，先执行 `"$BROWSER" recipe show <domain> "<任务>"`。返回 `recorded:true` 时，直接用 `"$BROWSER" recipe run <domain> "<任务>" --var name=value` 执行。
+2. 没有脚本时，照常操作页面。如果文件或任务小节不存在，先按 `references/recipe-template.md` 创建；还没有验证过的步骤时，删除模板中的示例 `steps`。
+3. `recipe run` 返回 `ok:false` 时，查看 `failedStep`、该步的 `error` 和 `screenshot`。使用同一 Profile 在当前页面继续完成任务，不要重新打开页面。成功后修正选择器、等待条件或参数，再执行一次脚本验证；连续两次失败时，删除 `steps` 或只保留文字说明。
+4. 本次任务成功后，只执行一次 `"$BROWSER" recipe log <domain> "<任务>"` 来累计次数。返回 `count>=3` 且尚无 `steps` 时，把验证过的步骤写入 `steps` 代码块，再用 `recipe run` 验证。
+5. 结束时，用 `log add` 记录实际结果，并说明脚本是否可用、是否修正。`recipe run` 不会自动累计次数、追加验证日志，也不会生成或修正脚本，这些都由 Agent 完成。
 
 查看全部：`"$BROWSER" recipe list [domain-filter]`；只看次数和参数：`recipe show <domain>`。`recipe run --dry-run` 只校验参数与命令，不执行。
 
 ## Quick start
 
-Requires Node.js 20+ with the currently locked Playwright dependency, npm, and Chrome. The `bin/browser` launcher requires Bash (including on Windows); without Bash, run `node <skill-directory>/scripts/browser.mjs ...` directly. The examples below use the default installation path; adjust it when installed with `--dest` or a custom `DSH_HOME`.
+The currently locked Playwright dependency requires Node.js 20 or later. You also need npm and Chrome. The `bin/browser` launcher uses Bash, including on Windows. Without Bash, run `node <skill-directory>/scripts/browser.mjs ...` directly. The examples use the default installation path; adjust it if you installed with `--dest` or a custom `DSH_HOME`.
 
 ```bash
 BROWSER="$HOME/.dsh/skills/browser-operator/bin/browser"
 
-# 1. First run only (already installed on this machine):
+# 1. Install dependencies if the installer has not already done so
 npm install --prefix "$HOME/.dsh/skills/browser-operator/scripts"
 
 # 2. Read the saved experience first (if any)
@@ -178,18 +175,18 @@ npm install --prefix "$HOME/.dsh/skills/browser-operator/scripts"
 "$BROWSER" stop --profile mysite
 ```
 
-The default mode is **headless** for speed. Add `--headed` to `open` when you want to watch, or use `mode headed` at any time. Login/verification automatically escalates to headed (unless `--no-auto-headed`) and can be switched back with `mode headless`.
+Chrome runs without a visible window (headless) by default. Add `--headed` to `open`, or use `mode headed`, when a visible window is needed. Detecting login or verification switches it to headed unless `--no-auto-headed` is set. To return to headless, follow the session-cookie guidance below.
 
-**Headed focus handling (macOS).** The daemon records the frontmost app before launching headed Chrome, attempts to restore that app's focus, and skips `page.bringToFront()` during headed navigation/clicks. Consequences:
+**Window focus on macOS.** Before launching visible Chrome, the daemon records which app is in front and tries to return focus to it afterward. Navigation and clicks in headed mode skip `page.bringToFront()`, so the browser may stay behind other apps:
 
-- The user may not notice the window. When they need to log in / verify, either tell them "Chrome 已在后台打开，请切换过去" or run `browser focus --profile <name>` (the only thing that foregrounds it).
-- `wait-login` / `wait-verification` do **not** foreground the window; they only poll.
+- When the user needs to log in or verify, tell them “Chrome 已在后台打开，请切换过去”, or run `browser focus --profile <name>` to bring it forward.
+- `wait-login` and `wait-verification` only check the page repeatedly; they do not bring the window forward.
 - If the user asks to watch, run `focus` once so they see it.
 
 
-Changing mode **closes and relaunches Chrome**. `open`/`goto` keeps the current mode unless `--headed`/`--headless` is passed explicitly or login/verification triggers automatic headed escalation. `--no-auto-headed` disables that escalation for the navigation. Restarting still loses session cookies (e.g. Tomcat `JSESSIONID`) unless the profile has `restore-session on` (see below).
+Changing mode closes and relaunches Chrome. Plain `open` and `goto` keep the current mode unless you pass `--headed` or `--headless`, or login or verification triggers a visible window. `--no-auto-headed` disables the automatic switch for that navigation. Restarting loses session cookies, such as Tomcat `JSESSIONID`, unless the profile has `restore-session on` (see below).
 
-## Login persistence (the required flow)
+## Login persistence
 
 ```
 open target site (headless) → reuse existing profile
@@ -203,8 +200,8 @@ open target site (headless) → reuse existing profile
 
 - Profiles live under `~/.dsh/browser-operator/profiles/<name>/chrome-profile`.
 - Use one stable profile per site, e.g. `--profile wechat`, `--profile xiaohongshu`, `--profile company-sso`.
-- Re-running `open` with the same profile reuses cookies/localStorage. **Do not ask the user to log in again unless the page actually shows a login screen.**
-- Session cookies (no `Expires`, e.g. Tomcat `JSESSIONID`) are **not** reloaded after Chrome restarts by default. Run `restore-session on --profile <name>` to launch Chrome with `--restore-last-session`; then a mode switch or daemon restart keeps the login as long as the server-side session is still valid. The setting is per profile and stops the daemon once so it applies on the next `open`; restored duplicate tabs are closed automatically so tabs do not pile up.
+- Opening the same profile again reuses its cookies and local storage. Ask the user to log in again only if the page shows a login screen.
+- Chrome does not reload session cookies without an `Expires` attribute, such as Tomcat `JSESSIONID`, after a restart by default. Run `restore-session on --profile <name>` to use `--restore-last-session` on the next launch. This lets a mode switch or daemon restart retain the login while the server-side session remains valid. The setting is saved per profile and stops the daemon once, taking effect on the next `open`. Duplicate restored tabs are closed automatically.
 - `wait-login` polls until `login.likely` becomes false (no visible password input / login URL / "登录超时" text), up to the timeout.
 - `state` and `snapshot` include `login.likely`, `login.reasons`, and `challenge.likely`. If `challenge.likely` is true (slider/CAPTCHA), ask the user to complete it in the visible Chrome, then run `wait-verification`.
 - The browser stays open between CLI commands, so `sessionStorage`, tabs, and popups survive while the daemon is running.
@@ -212,12 +209,12 @@ open target site (headless) → reuse existing profile
 
 ## Browser fingerprint (fixed per profile)
 
-Every profile gets **one stable fingerprint** on first launch, stored in `~/.dsh/browser-operator/profiles/<name>/settings.json` under `fingerprint`. It does not change between pages, reloads, headed/headless switches, or daemon restarts.
+Each profile gets a fingerprint on first launch, stored under `fingerprint` in `~/.dsh/browser-operator/profiles/<name>/settings.json`. It stays the same across pages, reloads, mode switches, and daemon restarts.
 
-- UA/UA-CH: the **same identity is injected in both headed and headless mode**, so switching modes never changes the fingerprint. The UA keeps the real Chrome major version; UA-CH metadata (architecture, platformVersion, bitness) is computed from the host. Headless is the default; headed is only for manual login or verification.
-- `navigator`: left **native** by default (`platform`, `vendor`, `languages` already match the host). JS overrides are opt-in (`fingerprint.navigator: true`) because tampering is detectable.
+- UA/UA-CH: both modes use the same browser identity. The UA keeps the real Chrome major version; UA-CH metadata (`architecture`, `platformVersion`, `bitness`) comes from the host. Headless is the default; use headed when the user needs to log in, verify, or watch the task.
+- `navigator`: keeps native values by default because `platform`, `vendor`, and `languages` already match the host. JavaScript overrides require `fingerprint.navigator: true`; sites can detect these changes.
 - WebGL: uses the real GPU by default (for example Apple M1 Pro); set `fingerprint.webgl: "spoof"` to pin a renderer or `"off"` to disable WebGL.
-- Canvas/Audio: deterministic noise from the profile seed, so the fingerprint hash is stable across reloads and restarts.
+- Canvas/Audio: adds noise based on the profile's fixed seed, keeping the fingerprint hash stable across reloads and restarts.
 - `navigator.webdriver`: kept `false` by `--disable-blink-features=AutomationControlled`.
 - DevTools false positives: `console.table` is deferred by default (`fingerprint.devtoolsFix: true`). CDP serialization makes `console.table` slow, which timing-based devtools detectors (e.g. `devtools-detector`) misread as an open DevTools panel.
 - locale/timezone: taken from the OS; macOS `zh-Hans_US` is normalized to `zh-CN`.
@@ -229,37 +226,40 @@ Inspect or reset:
 "$BROWSER" fingerprint --profile mysite --reset  # regenerate it (stops the daemon)
 ```
 
-A profile fingerprint is rebuilt automatically if the same profile is opened on a different OS (for example a macOS profile on Windows). Overridable keys in `settings.json`: `fingerprint.webgl` (`auto` by default, `spoof`, `off`), `fingerprint.navigator` (`false` by default), `fingerprint.canvasNoise`, `fingerprint.audioNoise`, `fingerprint.devtoolsFix` (`true` by default), `userAgent`, `locale`, `timezone`. Do not reset a fingerprint on a logged-in site: the site will see a different device.
+Opening a profile on a different operating system, such as moving it from macOS to Windows, automatically rebuilds its fingerprint. Do not reset the fingerprint while logged in to a site: the site will see a different device.
+
+You can override these keys in `settings.json`: `fingerprint.webgl` (`auto` by default, `spoof`, `off`), `fingerprint.navigator` (`false` by default), `fingerprint.canvasNoise`, `fingerprint.audioNoise`, `fingerprint.devtoolsFix` (`true` by default), `userAgent`, `locale`, `timezone`.
 
 ## Commands
 
 | Command | Purpose |
 |---|---|
-| `open <url> [--profile name] [--headed\|--headless] [--no-auto-headed] [--snapshot]` | Open URL; keeps current mode unless a mode flag is given; auto-heads on manual auth |
+| `open <url> [--profile name] [--headed\|--headless] [--no-auto-headed] [--snapshot]` | Open a URL; keep the current mode unless a mode flag is given or manual login/verification requires a visible window |
 | `mode headed` / `mode headless` | Switch mode (restarts Chrome; session cookies can be restored with `restore-session on` while the server session remains valid). On macOS, headed launch attempts to restore the previous app's focus |
-| `focus` | Bring the headed Chrome window to the front (explicit opt-in; nothing else foregrounds it) |
+| `focus` | Bring the visible Chrome window to the front |
 | `restore-session on\|off` | Per-profile: relaunch Chrome with `--restore-last-session` so session cookies survive restarts; stops the daemon so it applies on next `open` |
 | `fingerprint [--reset]` | Show the profile's fixed fingerprint; `--reset` regenerates it and stops the daemon |
 | `goto <url>` | Alias of `open`, with the same flags |
-| `state` | Current URL/title/pages/login hints |
+| `state` | Read the current URL, title, tabs, and login hints |
 | `snapshot [--mode interactive\|text\|full\|forms] [--selector CSS] [--frame CSS]` | Page structure with suggested selectors |
-| `query <selector> [--limit N] [--html] [--all-attrs] [--frame CSS]` | Read matched DOM nodes (text/attrs/rect), including non-interactive divs |
-| `click <selector> [--nth N] [--wait-for CSS] [--wait-nav] [--frame CSS] [--timeout ms] [--allow-auth]` | Real mouse click + effect verification; `--allow-auth` only when the user explicitly asked you to log in |
+| `query <selector> [--limit N] [--html] [--all-attrs] [--frame CSS]` | Read text, attributes, and bounds of matching DOM nodes, including non-interactive elements |
+| `click <selector> [--nth N] [--wait-for CSS] [--wait-nav] [--frame CSS] [--timeout ms] [--allow-auth]` | Send a real mouse click and report its effect; use `--allow-auth` only when the user explicitly asks you to log in |
 | `drag <source> <target> [--nth N] [--target-nth N] [--steps N] [--method auto\|dragTo\|mouse\|js]` | Real drag/drop; auto tries stepped mouse then `dragTo`; `js` needs `--allow-js` |
-| `eval <expression>` | Explicit JS escape hatch for page-specific handlers; never bypasses login/verification |
+| `eval <expression>` | Run JavaScript for page-specific handlers; cannot bypass login or verification |
 | `fill <selector> <value> [--type] [--append] [--frame CSS] [--allow-auth]` | Fill input; `--type` types with keyboard events; `--allow-auth` only for user-authorized login |
 | `press <key> [--allow-auth]` | Keyboard key (e.g. `Enter`, `Escape`, `Tab`); `--allow-auth` only for user-authorized login submit |
 | `hover <selector> [--wait ms]` | Real mouse hover; use before clicking hover-only menus |
 | `select <selector> <value> [--label] [--allow-auth]` | Select an option; `--allow-auth` only for user-authorized login |
 | `wait <selector>` / `wait --url <pattern>` | Wait for element or URL |
 | `screenshot [path] [--full-page]` | Save a screenshot; default under `~/.dsh/browser-operator/screenshots` |
+| `annotate start\|read\|wait\|cancel [--timeout ms]` | Enable, read, wait for, or disable page annotations; the setting is saved |
 | `switch --index N` / `switch --url includes` | Switch active tab |
 | `close` | Close the active tab and switch back to the remaining page |
 | `wait-login [--timeout ms]` | Wait until the login screen disappears |
 | `wait-verification [--timeout ms]` | Wait until a slider/CAPTCHA verification page disappears (user solves it in the headed window) |
 | `console [--limit N] [--filter text] [--clear]` | Recent browser console logs and page errors |
 | `network [--limit N] [--filter text] [--type xhr\|fetch\|document] [--errors] [--clear]` | Recent requests/responses, status, duration, failures |
-| `debug` | One bundle: state + screenshot + recent console + recent network |
+| `debug` | Collect page state, a screenshot, and recent Console and Network records |
 | `stop` | Close browser and flush the profile |
 | `status` | Show daemon mode (headless/headed) without starting one |
 | `profiles` | List known profiles and their last URL/title (no secrets) |
@@ -277,7 +277,7 @@ A profile fingerprint is rebuilt automatically if the same profile is opened on 
 | `recipe log <domain> <task>` | Increment that task's `次数` and stamp `最近` |
 | `recipe run <domain> <task> [--var k=v]... [--dry-run] [--profile name] [--allow-auth]` | Replay the task's `steps`; stops at the first failure and keeps the page for manual takeover; login requires explicit authorization for this run |
 
-Operational commands return JSON. `ok:false` means the action failed; inspect `error.code`, `error.message`, `error.diagnosis`, and any `error.screenshot` / `error.recentConsole` / `error.recentNetwork` attachments. Even with `ok:true`, inspect `warning`, `effect`, and the business success condition.
+Operational commands return JSON. If `ok:false`, check `error.code`, `error.message`, `error.diagnosis`, and any `error.screenshot`, `error.recentConsole`, or `error.recentNetwork` attachments. If `ok:true`, still check `warning`, `effect`, and whether the requested result was achieved.
 
 ## Real click rules
 
@@ -304,7 +304,7 @@ Operational commands return JSON. `ok:false` means the action failed; inspect `e
 - `authOverride: true` in the response means the click/fill ran on a login page with `--allow-auth`. It never appears for slider/CAPTCHA pages.
 - **Do not use `--js`** unless the user explicitly asks for a DOM click or the page is impossible to drive with real input. `--js` returns `trusted:false` and is not a real mouse click.
 - `--force` skips actionability checks but still clicks the real screen coordinates; it can hit an overlay. Use only with a clear reason.
-- If `covered` is returned, a real click cannot reach the target — a human would hit the overlay too. First close the overlay (`press Escape`, click a close button), scroll, or choose the visible element. Do not retry the same covered selector.
+- If `covered` is returned, another element blocks the click. Close the overlay with `press Escape` or its close button, scroll, or choose a visible element. Do not retry the same covered selector.
 - If `warning` says the page received no click event or no observable change, run `snapshot` again and verify the selector/coordinates before retrying.
 - For hover-only menus: `hover` the parent, then `click` the item that appeared.
 - For iframes: pass `--frame "#iframe-id"` to `click`, `snapshot`, `fill`, etc. Playwright resolves the frame internally.
@@ -321,33 +321,33 @@ Use `drag` for drag-and-drop lists, sortable tables, kanban boards, and upload d
 - Default `--method auto` performs a stepped real-mouse drag first, then falls back to Playwright `dragTo` if no URL/DOM change is observed.
 - SortableJS / jQuery UI / pointer-based lists usually work with the mouse path; HTML5 native drag can use `--method js --allow-js` as an explicit fallback.
 - If the source/target has hidden duplicates, inspect `query` and choose the matching DOM index with `--nth` / `--target-nth` (starting at 1); selecting a hidden match fails. Without an index, the command picks a visible match. It returns `source`/`target` boxes.
-- A `warning` means the drag ran but no URL/DOM change was observed. Check source/target, drop position, or the component's own JS state; don't assume success from the mouse action alone.
+- A `warning` means the drag ran but no URL or DOM change was observed. Check the source, target, drop position, or component's JavaScript state before treating the action as successful.
 - For JS-managed date/time pickers, don't trust `fill` alone: click the field, wait for the visible calendar, then click the target day/cell. Prefer `wait <selector>` over fixed sleeps.
-- `eval` is an explicit escape hatch for page-specific handlers when real input is impossible. It executes JavaScript rather than trusted mouse/keyboard input; its response has no `trusted` field. It must not be used to bypass login, verification, or CAPTCHA.
+- Use `eval` for page-specific handlers only when real input cannot perform the action. It runs JavaScript rather than trusted mouse or keyboard input, and its response has no `trusted` field. Never use it to bypass login, verification, or CAPTCHA.
 
-## 通用任务模式（写经验时套用）
+## 不同任务需要记录什么
 
 | 任务 | 经验里必须写清楚 |
 |---|---|
-| 搜索 | 结果页直达 URL 模板、搜索框/提交按钮、结果条目选择器、`--nth` 按该选择器的 DOM 匹配顺序从 1 编号、广告/重复节点；`query.items` 可包含隐藏/屏幕外节点并受 `--limit` 截断，`count` 是总匹配数 |
-| 列表 → 详情 | 列表卡片选择器、标题链接选择器、点击是否新标签页、详情标题/正文选择器、空页面兜底；详情页不要复用列表选择器 |
-| 表单提交 | 字段选择器/标签、填写方式（fill/type/select）、提交按钮、成功/失败判定选择器；登录/验证默认人工，用户明确授权后代填需 `--allow-auth` |
-| 拖拽/排序 | source/target 选择器、`--nth`/`--target-nth`、`--method`、drop 位置、成功后的 DOM/URL 变化 |
-| 复杂组件 | datepicker/弹层/富文本/级联选择；先 `wait` 可见容器，再点可见项，不要只 `fill` |
-| 文章阅读 | 标题来源（`state.title` / 可见 h1）、正文容器、摘要截取方式、canonical 干净 URL、分页/懒加载/视频噪音 |
-| 多标签/iframe | 新标签页切换规则、iframe 选择器、`--frame` 用法 |
-| 弹窗/确认 | 默认 `dismiss`（取消）；需要确认时先 `dialog accept`；prompt 用 `--text`；click 返回 `dialogs` 作为证据 |
+| 搜索 | 结果页直达 URL 模板，搜索框、提交按钮和结果条目的选择器，广告和重复节点的排除方法。`--nth` 按 DOM 匹配顺序从 1 编号；`query.items` 可能包含隐藏或屏幕外节点，受 `--limit` 限制，`count` 则是总匹配数 |
+| 列表 → 详情 | 列表卡片和标题链接的选择器，是否打开新标签页，详情标题和正文的选择器，遇到空页面时怎么处理。详情页不要直接复用列表页的选择器 |
+| 表单提交 | 字段的选择器或标签、填写方式（fill/type/select）、提交按钮，以及判断成功或失败的选择器。登录和验证默认由用户完成；明确授权代登录后，相关命令需加 `--allow-auth` |
+| 拖拽/排序 | 源元素和目标元素的选择器、`--nth`、`--target-nth`、`--method`、放置位置，以及成功后的 DOM 或 URL 变化 |
+| 复杂组件 | 日期选择器、弹层、富文本或级联选择的操作方法。先用 `wait` 等容器可见，再点击可见选项，不要只用 `fill` |
+| 文章阅读 | 标题来源（`state.title` 或可见 h1）、正文容器、摘要截取方式、canonical URL，以及分页、懒加载和视频等无关内容的处理方法 |
+| 多标签/iframe | 新标签页的切换规则、iframe 选择器和 `--frame` 用法 |
+| 弹窗/确认 | 默认 `dismiss`（取消）；需要确认时先执行 `dialog accept`，prompt 的内容用 `--text` 传入。记录 `click` 返回的 `dialogs`，供检查弹窗内容 |
 
 ## Workflow for a new site
 
-0. `experience show <domain>`。有经验就直接照做；没有才探索。
+0. 执行 `experience show <domain>`，先参考已有经验；没有时，按前面的规则查看相关经验，再探索页面。
 1. `open <url> --profile <site>`.
-2. Read the returned `login` / `challenge` / `manualAuth`. By default `open` auto-switches to headed when manual auth is needed. If it is still headless, run `mode headed` (or `wait-login` / `wait-verification`, which also escalates). Default: ask the user to complete it in the visible window. Only if the user explicitly told you to log in for them, drive it yourself with `--allow-auth` (login kind only; sliders/CAPTCHA still stay with the user). After it is done you can stay headed (fast enough) or run `mode headless` if the profile has `restore-session on`, otherwise switching modes restarts Chrome and drops session cookies.
+2. Check the returned `login`, `challenge`, and `manualAuth`. `open` normally switches to headed when the user needs to log in or verify. If Chrome is still headless, use `mode headed`, `wait-login`, or `wait-verification` to switch. Follow the login rules above: the user handles it unless they explicitly ask you to log in with `--allow-auth`; sliders and CAPTCHAs always require the user. Afterward, stay headed, or switch back only if `restore-session on` was enabled before login, since changing modes restarts Chrome.
 3. `snapshot --mode interactive` to get visible elements and suggested selectors.
 4. `click <selector>` with `--wait-for` / `--wait-nav` when the page loads asynchronously.
 5. After each click, check `trusted`, `effect`, and `warning`; take a screenshot if the result is unclear.
-6. 成功后按 `references/experience-template.md` 写/更新 `~/.dsh/browser-operator/experiences/<domain>.md`，并 `experience validate <domain>`。
-7. 给最终答复前执行“任务收尾检查”：再 `experience show <domain>`，有变化更新并 validate；无论有无变化，都用 `log add` 追加本次验证日志。
+6. 成功后，按 `references/experience-template.md` 保存或更新 `~/.dsh/browser-operator/experiences/<domain>.md`，再执行 `experience validate <domain>`。
+7. 给最终答复前，按前面的要求复查经验：执行 `experience show <domain>`，重定向后用 `experience current`。有变化就更新并校验，无论有无变化都用 `log add` 记录本次结果。
 8. When done, `stop` to flush the profile. The next `open` reuses it; login still depends on cookie persistence and server-side session validity.
 
 Example (WeChat public account):
@@ -363,9 +363,9 @@ BROWSER="$HOME/.dsh/skills/browser-operator/bin/browser"
 "$BROWSER" stop --profile wechat
 ```
 
-## Dialogs (important)
+## Native dialogs
 
-Native `alert` / `confirm` / `prompt` / `beforeunload` dialogs default to **dismiss/cancel**. The CLI never auto-confirms them, because that can submit, delete, publish, or navigate unexpectedly.
+Native `alert`, `confirm`, `prompt`, and `beforeunload` dialogs are dismissed or cancelled by default. Accepting one may submit data, delete an item, publish content, or leave the page, so the CLI requires an explicit command to accept it.
 
 ```bash
 # Default: dismiss (confirm -> false, prompt -> null)
@@ -390,7 +390,7 @@ Native `alert` / `confirm` / `prompt` / `beforeunload` dialogs default to **dism
 
 ## Automatic debugging
 
-Browser action exceptions attempt to attach a screenshot and recent console/network entries. Validation/startup failures and returned timeout results may lack these attachments:
+When a browser action throws an exception, the CLI tries to attach a screenshot and recent Console and Network records. Validation failures, startup failures, and returned timeout results may have no attachments:
 
 ```json
 {
@@ -406,7 +406,7 @@ Browser action exceptions attempt to attach a screenshot and recent console/netw
 }
 ```
 
-On demand:
+To collect details yourself:
 
 ```bash
 "$BROWSER" debug --profile mysite
@@ -416,9 +416,9 @@ On demand:
 "$BROWSER" wait-verification --profile mysite --timeout 120000
 ```
 
-The buffers are per daemon, capped (300 console / 500 network), URLs are token-masked, and request bodies/headers are not recorded. Clear them with `--clear` after reproducing an issue.
+Each daemon keeps up to 300 Console entries and 500 Network entries. Tokens in URLs are masked; request bodies and headers are not recorded. Use `--clear` to clear the records after reproducing an issue.
 
-Headed vs headless: headless is the default for automation; use `mode headed` or `open --headed` when the user must log in / solve verification. Switching modes restarts Chrome: keep the current mode (plain `open`/`goto` no longer change it) unless you need the other one; with `restore-session on` the login survives the restart. `wait-login` and `wait-verification` auto-escalate, so no `stop` is needed to change mode.
+For manual login or verification, use `mode headed` or `open --headed`. `wait-login` and `wait-verification` can also switch to headed without a separate `stop`. Mode switches restart Chrome; enable `restore-session on` before login if session cookies need to survive, and remember that the server-side session must still be valid.
 
 ## Troubleshooting
 
@@ -430,9 +430,9 @@ Headed vs headless: headless is the default for automation; use `mode headed` or
 | `not-found` | Selector is wrong/ambiguous; copy a selector suggested by `snapshot` |
 | Chrome not found | Install Google Chrome or set `CHROME_PATH` |
 | Daemon start timeout | Check `~/.dsh/browser-operator/profiles/<name>/daemon.log`; run `stop` and retry |
-| User cannot see the browser | Run `mode headed` (or `open --headed`) then `focus`; headed stays behind on purpose |
+| User cannot see the browser | Run `mode headed` (or `open --headed`), then `focus` to bring it forward |
 | Login keeps asking | Confirm the same `--profile` is used; do not delete the profile directory |
-| `manual-auth-required` | Default: the user logs in or completes verification in the visible Chrome, then `wait-login` / `wait-verification`. Only when the user explicitly asked you to log in for them, retry the same command with `--allow-auth` (login kind only). Never use `--js`/`--force` to get around it |
+| `manual-auth-required` | Ask the user to log in or verify in visible Chrome, then run `wait-login` or `wait-verification`. For login only, if the user explicitly asks you to do it, retry the relevant command with `--allow-auth`. Never bypass the block with `--js` or `--force` |
 | Dialog appears and action is cancelled | Default policy is dismiss. Inspect `dialogs`; if the message is safe and confirmation is intended, run `dialog accept` (prompt text via `--text`) and retry |
 | `challenge.likely:true` / `verification-timeout` | A slider/CAPTCHA is blocking the page. Ask the user to complete it in the visible Chrome, then run `wait-verification` |
 
@@ -443,4 +443,4 @@ Headed vs headless: headless is the default for automation; use `mode headed` or
 - `open` accepts `file://`, `http://`, and `https://`.
 - The daemon is local-only (`127.0.0.1`), token-protected, and exits after 30 idle minutes (configurable with `--idle-minutes`). Mode is stored in `daemon.json` and reported by `status` / `health`.
 - This skill is the single entry point for browser operations. If a capability is missing, extend `scripts/browser.mjs` rather than creating a parallel script.
-- Experience memory is part of the skill contract: read `experience show` first; write/update the fixed md after a successful exploration. The next session must be able to finish the same site without re-discovering selectors.
+- Always read saved site notes with `experience show` before a task, then save or update them after successful exploration. Record enough detail for the next session to perform the same task without finding the selectors again.
