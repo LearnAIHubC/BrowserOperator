@@ -9,28 +9,20 @@ updated: 2026-11-05
 
 # example.com 操作脚本
 
-> 文件开头的 YAML 信息（frontmatter）必须从第一行开始。每个域名保存一份 Markdown，路径为 `~/.dsh/browser-operator/脚本/<canonical-domain>.md`。
->
-> 每个任务用一个 `##` 小节，成功后用 `browser recipe log` 累计次数。`steps` 每行写一个 browser 子命令，不加 `browser` 前缀。动态内容用 `{{name}}` 占位，并在 `- 参数:` 行声明。
->
-> 下方选择器只演示格式，执行前要替换为本站已验证的选择器。不要在脚本中保存凭据或 `--allow-auth`；只有用户在当前对话明确授权代登录时，才在 `recipe run` 命令上加 `--allow-auth`。
+> 模板说明：这是一个站点的任务索引，frontmatter 必须从文件第一行开始。一个域名一份，放在 `~/.dsh/browser-operator/脚本/<canonical-domain>.md`；任务的脚本放 `~/.dsh/browser-operator/脚本/<canonical-domain>/<任务名>.mjs`，模板见 `recipe-template.mjs`。
+> `profile` 必填，脚本用它打开浏览器。站点地址不是 `https://<domain>` 时加一行，如 `origin: http://localhost:8765`。
+> 一个任务一个 `## <任务名>` 段。任务名用小写字母、数字、下划线，说的是动作，项目、环境、版本号是参数。
+> `说明 / 次数 / 最近 / 状态 / 上次失败` 这几行由 `log add --task` 和 `recipe run` 维护，不要手改。平时不用手建这个文件：第一次 `log add --task` 会自动建，只需要补上 `profile`。
+> 会重复做、但每次步骤都不一样、固定不下来的任务，在它的段里手写一行 `- 不写脚本: <原因>`，之后不会再提示写脚本，计数照常。
 
-## 搜索并读取结果
+## search_read
 
+- 说明: 搜索关键词并读取前几条结果
 - 次数: 0
-- 参数: query=搜索词
 - 最近: 2026-11-05
-
-```steps
-open https://example.com/ --profile example
-fill "#kw" "{{query}}"
-click "#su" --wait-nav
-wait "#content_left"
-query "#content_left"
-```
 
 备注：
 
-- 说明选择器为什么可用，哪些步骤需要等待，以及失败后怎么处理。
-- 写清已知的环境差异，如 dev/sit/uat/prod 使用不同的主机名、机构代号或账号。
-- 提醒哪些信息不能保存到脚本中，如密码、token、OTP、身份证号；不要填入这些信息的真实值。
+- 这个任务什么时候适用、什么时候不适用（脚本写好后以脚本里的 `meta.scope` 为准）
+- 已知环境差异（dev/sit/uat/prod 的 host、机构代号、账号不同）
+- 不写密码、token、OTP、身份证号

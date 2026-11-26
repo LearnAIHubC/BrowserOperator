@@ -13,7 +13,7 @@
 
 import { createServer } from "node:http";
 import { spawn, spawnSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   appendFileSync,
   closeSync,
@@ -28,8 +28,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir, release as osRelease } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { basename, dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { chromium } from "playwright-core";
 
 const SELF = fileURLToPath(import.meta.url);
@@ -751,9 +751,11 @@ const requestStarts = new WeakMap();
 
 function pushDiagnostic(kind, entry) {
   const list = diagnostics[kind];
-  list.push({ ts: Date.now(), ...entry });
+  const item = { ts: Date.now(), ...entry };
+  list.push(item);
   const max = kind === "console" ? MAX_CONSOLE : kind === "network" ? MAX_NETWORK : MAX_DIALOG;
   if (list.length > max) list.splice(0, list.length - max);
+  return item;
 }
 
 function attachDiagnostics(page) {
@@ -779,26 +781,28 @@ function attachDiagnostics(page) {
       });
     } catch {}
   });
+  // Never handled automatically: the dialog stays open until the agent runs
+  // `dialog accept` or `dialog dismiss` (see dialogAction).
   page.on("dialog", (dialog) => {
-    const action = dialogPolicy === "accept" ? "accept" : "dismiss";
-    const promptText = nextDialogText;
-    nextDialogText = "";
-    try {
-      pushDiagnostic("dialog", {
-        page: maskUrl(page.url()),
-        type: dialog.type(),
-        message: String(dialog.message() || "").slice(0, 1000),
-        policy: action,
-        promptText: promptText || undefined,
-      });
-    } catch {}
-    try {
-      if (action === "accept") {
-        dialog.accept(promptText || undefined).catch(() => {});
-      } else {
-        dialog.dismiss().catch(() => {});
-      }
-    } catch {}
+    const record = pushDiagnostic("dialog", {
+      page: maskUrl(page.url()),
+      type: dialog.type(),
+      message: String(dialog.message() || "").slice(0, 1000),
+      decision: "pending",
+    });
+    pendingDialogs.push({ dialog, page, record });
+    const signal = dialogSignal;
+    dialogSignal = deferred();
+    signal.resolve();
+  });
+  // Also fires when the user clicks the dialog in the headed window.
+  page.on("dialogclosed", (dialog) => {
+    const index = pendingDialogs.findIndex((entry) => entry.dialog === dialog);
+    if (index < 0) return;
+    const [entry] = pendingDialogs.splice(index, 1);
+    if (entry.record.decision !== "pending") return;
+    entry.record.decision = "closed-in-browser";
+    if (!pendingDialogs.length) blockedAction = null; // it resumes on its own
   });
   page.on("request", (request) => {
     requestStarts.set(request, Date.now());
@@ -1529,21 +1533,126 @@ async function clickAction(body) {
 
 // ── console / network / debug ─────────────────────────────────────
 
+// A native dialog freezes the page: evaluate, snapshot and screenshot hang
+// until it is handled. So the daemon keeps the dialog open, reports it to the
+// agent, and refuses page commands until `dialog accept` or `dialog dismiss`.
+const pendingDialogs = []; // { dialog, page, record }
+let dialogSignal = deferred(); // resolves when the next dialog opens
+let blockedAction = null; // the action a dialog interrupted, still running
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+function pendingDialog() {
+  for (let index = pendingDialogs.length - 1; index >= 0; index--) {
+    if (pendingDialogs[index].page.isClosed()) pendingDialogs.splice(index, 1);
+  }
+  return pendingDialogs[0] || null;
+}
+
+function dialogInfo({ dialog, record }) {
+  return {
+    type: record.type,
+    message: record.message,
+    defaultValue: record.type === "prompt" ? dialog.defaultValue() : undefined,
+    page: record.page,
+  };
+}
+
+function dialogPendingResult(action, extra = {}) {
+  const entry = pendingDialog();
+  return {
+    ok: true,
+    action,
+    status: "dialog-pending",
+    ...extra,
+    pendingDialog: dialogInfo(entry),
+    next: "看清 message 再决定：dialog accept（prompt 用 --text 填内容）或 dialog dismiss；处理前其他页面命令会被拒绝",
+    url: maskUrl(entry.page.url()),
+  };
+}
+
+// If a dialog opens before the action finishes, answer right away and leave the
+// action waiting behind the dialog. A timeout it hits later only measures how
+// long the agent took to decide, so its outcome is not reported as an error.
+async function untilDialog(action, promise) {
+  const outcome = await Promise.race([
+    promise.then((value) => ({ value })),
+    dialogSignal.promise.then(() => null),
+  ]);
+  if (outcome) return outcome.value;
+  promise.catch(() => {});
+  blockedAction = promise;
+  return dialogPendingResult(action);
+}
+
 async function dialogAction(body = {}) {
   const action = String(body.action || "status").toLowerCase();
-  if (action === "accept" || action === "dismiss") {
-    dialogPolicy = action;
-    nextDialogText = typeof body.text === "string" ? body.text : "";
-  } else if (action !== "status") {
+  if (action === "status") {
+    const entry = pendingDialog();
+    return {
+      ok: true,
+      action: "dialog",
+      pending: entry ? dialogInfo(entry) : null,
+      recent: diagnostics.dialog.slice(-20),
+      url: maskUrl(getPage().url()),
+    };
+  }
+  if (action !== "accept" && action !== "dismiss") {
     throw fail("bad-request", "dialog 需要 accept、dismiss 或 status");
   }
+  const entry = pendingDialog();
+  if (!entry) {
+    throw fail(
+      "no-pending-dialog",
+      "现在没有等处理的弹窗。弹窗不会按预设自动处理：先执行会弹窗的操作，返回 status=dialog-pending 后再 dialog accept 或 dismiss",
+      { recent: diagnostics.dialog.slice(-5) },
+    );
+  }
+  const { dialog, record } = entry;
+  pendingDialogs.splice(pendingDialogs.indexOf(entry), 1);
+  record.decision = action;
+  if (action === "accept" && record.type === "prompt") {
+    // Accepting without --text is pressing OK on the prefilled value.
+    record.promptText = typeof body.text === "string" && body.text !== "" ? body.text : dialog.defaultValue();
+  }
+  const handled = { type: record.type, message: record.message, decision: action, promptText: record.promptText };
+  const nextDialog = dialogSignal.promise.then(() => ({}));
+  const blocked = blockedAction;
+  blockedAction = null;
+  try {
+    if (action === "accept") await dialog.accept(record.promptText);
+    else await dialog.dismiss();
+  } catch (error) {
+    record.decision = "closed-in-browser";
+    throw fail("dialog-gone", `弹窗已经不在了，可能已在有头窗口里被手动关掉：${firstLine(error?.message || error)}`);
+  }
+
+  // Give the interrupted action a moment to finish, or the next dialog to open.
+  const outcome = await Promise.race([
+    blocked ? blocked.then((value) => ({ value }), () => ({})) : Promise.resolve({}),
+    nextDialog,
+    sleep(5000).then(() => ({})),
+  ]);
+  if (!outcome.value) await sleep(500);
+  if (pendingDialog()) {
+    if (!outcome.value) blockedAction = blocked;
+    return dialogPendingResult("dialog", { handled });
+  }
+  const current = getPage();
+  await current.waitForLoadState("domcontentloaded", { timeout: 5000 }).catch(() => {});
   return {
     ok: true,
     action: "dialog",
-    policy: dialogPolicy,
-    nextText: nextDialogText || undefined,
-    recent: diagnostics.dialog.slice(-20),
-    url: maskUrl(getPage().url()),
+    handled,
+    resumed: outcome.value,
+    url: maskUrl(current.url()),
+    title: await current.title().catch(() => ""),
   };
 }
 
@@ -1843,6 +1952,32 @@ async function fillAction(body) {
     await target.fill(value, { timeout });
   }
   return { ok: true, action: "fill", authOverride: authOverride || undefined, profile: currentProfile, target: await describeLocator(target), url: maskUrl(getPage().url()) };
+}
+
+async function uploadAction(body) {
+  const selector = String(body.selector || "").trim();
+  if (!selector) throw fail("bad-request", "upload 需要 selector");
+  const files = Array.isArray(body.files) ? body.files.map(String) : [];
+  if (!files.length) throw fail("bad-request", "upload 需要至少一个文件");
+  const manualAuth = await manualAuthHints(getPage());
+  if (manualAuth.required) {
+    throw fail(
+      "manual-auth-required",
+      `页面需要用户${manualAuth.kind === "verification" ? "完成验证" : "登录"}；upload 不在登录/验证页面上传文件，请先让用户在可见浏览器完成。`,
+      manualAuth,
+    );
+  }
+  const root = await getRoot(String(body.frame || ""));
+  // File inputs are often hidden behind a styled button, so no visibility check here.
+  await root.locator(selector).first().setInputFiles(files, { timeout: Number(body.timeout) || DEFAULT_TIMEOUT });
+  return {
+    ok: true,
+    action: "upload",
+    profile: currentProfile,
+    selector,
+    files: files.map((file) => ({ name: basename(file), size: statSync(file).size })),
+    url: maskUrl(getPage().url()),
+  };
 }
 
 async function pressAction(body) {
@@ -2885,6 +3020,7 @@ const RECIPE_ACTIONS = new Set([
   "debug",
   "wait-login",
   "wait-verification",
+  "upload",
 ]);
 const RECIPE_AUTH_ACTIONS = new Set(["click", "fill", "press", "select"]);
 
@@ -3071,80 +3207,923 @@ function captureRecipeFailure(domain, title, profile) {
   }
 }
 
-function recipeListAction(filter) {
+// ── recipe index (脚本/<domain>.md) maintained lines ─────────────
+
+const RECIPE_TASK_NAME = /^[a-z][a-z0-9_]*$/;
+const RECIPE_FIELD_LINE = /^\s*[-*]\s*([^\s:：]+)\s*[:：]\s*(.*)$/;
+
+function recipeToday() {
+  return logNow().slice(0, 10);
+}
+
+// Sets one `- key: value` line of a task section (section[0] is the heading).
+// An empty value removes the line; a missing line goes after the leading field lines.
+function setRecipeSectionField(section, key, value) {
+  const text = value === undefined || value === null || value === "" ? "" : `- ${key}: ${value}`;
+  const index = section.findIndex((line, at) => at > 0 && line.match(RECIPE_FIELD_LINE)?.[1] === key);
+  if (index >= 0) {
+    if (text) section[index] = text;
+    else section.splice(index, 1);
+    return;
+  }
+  if (!text) return;
+  let at = 1;
+  while (at < section.length && !section[at].trim()) at += 1;
+  if (at < section.length && RECIPE_FIELD_LINE.test(section[at])) {
+    while (at < section.length && RECIPE_FIELD_LINE.test(section[at])) at += 1;
+  } else {
+    at = 1;
+  }
+  section.splice(at, 0, text);
+}
+
+function recipeSectionFields(section) {
+  const fields = {};
+  for (const line of section.slice(1)) {
+    const match = line.match(RECIPE_FIELD_LINE);
+    if (match && !(match[1] in fields)) fields[match[1]] = match[2].trim();
+  }
+  return fields;
+}
+
+function recipeIndexHeader(domain, site) {
+  return ["---", ...(site ? [`site: ${site}`] : []), `domain: ${domain}`, `updated: ${recipeToday()}`, "---", "", `# ${domain} 操作脚本`, ""].join("\n");
+}
+
+// Applies edit(fields) -> { key: value } to the `## <task>` section of the
+// index, creating the file and the section when missing.
+function editRecipeIndex(domain, task, edit, init = {}) {
+  const path = recipePath(domain);
+  const fileExisted = existsSync(path);
+  const text = fileExisted ? readFileSync(path, "utf8") : recipeIndexHeader(domain, init.site);
+  const lines = text.replace(/\r?\n$/, "").split(/\r?\n/);
+  let found = recipeTasks(lines.join("\n")).find((item) => item.title === task);
+  const created = !found;
+  if (!found) {
+    while (lines.length && !lines.at(-1).trim()) lines.pop();
+    lines.push("", `## ${task}`);
+    if (init.desc) lines.push(`- 说明: ${String(init.desc).replace(/\s+/g, " ").trim()}`);
+    lines.push("- 次数: 0");
+    found = recipeTasks(lines.join("\n")).find((item) => item.title === task);
+  }
+  const section = lines.slice(found.headingIndex, found.endIndex);
+  const fields = recipeSectionFields(section);
+  const updates = (edit && edit(fields)) || {};
+  for (const [key, value] of Object.entries(updates)) setRecipeSectionField(section, key, value);
+  lines.splice(found.headingIndex, found.endIndex - found.headingIndex, ...section);
+  writeRecipeIndex(path, lines);
+  return { path, created, fileCreated: !fileExisted, fields: { ...fields, ...updates } };
+}
+
+// Writes the index back with exactly one trailing newline, so repeated runs do not pile up blank lines.
+function writeRecipeIndex(path, lines) {
+  writeFileSync(path, `${lines.join("\n").replace(/\s+$/, "")}\n`);
+}
+
+function recipeScriptNames(domain) {
+  const dir = join(RECIPES, domain);
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".mjs") && !entry.name.startsWith("_"))
+    .map((entry) => entry.name.slice(0, -4))
+    .sort();
+}
+
+function recipeTaskNames(domain) {
+  const path = join(RECIPES, `${domain}.md`);
+  const titles = existsSync(path) ? recipeTasks(readFileSync(path, "utf8")).map((task) => task.title) : [];
+  return [...new Set([...titles, ...recipeScriptNames(domain)])];
+}
+
+function experienceSite(domain) {
+  try {
+    return parseExperienceMeta(readFileSync(join(EXPERIENCES, `${domain}.md`), "utf8")).site || "";
+  } catch {
+    return "";
+  }
+}
+
+// ── recipe scripts (脚本/<domain>/<task>.mjs) ─────────────────────
+
+function recipeScriptHash(file) {
+  const hash = createHash("sha256").update(readFileSync(file));
+  const dir = dirname(file);
+  for (const name of readdirSync(dir).filter((item) => item.startsWith("_") && item.endsWith(".mjs")).sort()) {
+    hash.update(readFileSync(join(dir, name)));
+  }
+  return hash.digest("hex").slice(0, 8);
+}
+
+async function loadRecipeScript(file) {
+  try {
+    const module = await import(pathToFileURL(file).href);
+    if (!module.meta || typeof module.meta.desc !== "string" || !module.meta.desc.trim()) {
+      return { error: { code: "bad-script", message: "脚本要导出 meta，且 meta.desc 必填" } };
+    }
+    if (typeof module.run !== "function") {
+      return { error: { code: "bad-script", message: "脚本要导出 async function run(b, vars)" } };
+    }
+    return { meta: module.meta, run: module.run };
+  } catch (error) {
+    return { error: { code: "script-load-failed", message: firstLine(error?.message || error) } };
+  }
+}
+
+function recipeParamList(meta) {
+  const params = meta?.params && typeof meta.params === "object" ? meta.params : {};
+  return Object.entries(params).map(([name, spec]) => {
+    const item = spec && typeof spec === "object" ? spec : { desc: String(spec ?? "") };
+    return {
+      name,
+      desc: String(item.desc || ""),
+      required: item.default === undefined,
+      default: item.default === undefined ? undefined : String(item.default),
+      enum: Array.isArray(item.enum) ? item.enum.map(String) : undefined,
+      pattern: item.pattern ? String(item.pattern) : undefined,
+    };
+  });
+}
+
+// Defaults are filled in but not checked against enum/pattern: only values the caller typed are.
+function recipeResolveVars(meta, list) {
+  const params = recipeParamList(meta);
+  const given = {};
+  const problems = [];
+  for (const item of Array.isArray(list) ? list : list ? [list] : []) {
+    const at = String(item).indexOf("=");
+    if (at <= 0) {
+      problems.push(`--var ${item} 要写成 名字=值`);
+      continue;
+    }
+    given[String(item).slice(0, at).trim()] = String(item).slice(at + 1);
+  }
+  for (const name of Object.keys(given)) {
+    if (!params.some((param) => param.name === name)) problems.push(`没有声明的参数: ${name}`);
+  }
+  const vars = {};
+  for (const param of params) {
+    const value = given[param.name];
+    if (value === undefined) {
+      if (param.required) problems.push(`缺少参数: --var ${param.name}=…${param.desc ? `（${param.desc}）` : ""}`);
+      else vars[param.name] = param.default;
+      continue;
+    }
+    if (param.enum && !param.enum.includes(value)) problems.push(`${param.name}=${value} 不在可选值里: ${param.enum.join(" / ")}`);
+    if (param.pattern) {
+      try {
+        if (!new RegExp(param.pattern).test(value)) problems.push(`${param.name}=${value} 不匹配 ${param.pattern}`);
+      } catch {
+        problems.push(`参数 ${param.name} 的 pattern 写错了: ${param.pattern}`);
+      }
+    }
+    vars[param.name] = value;
+  }
+  return { vars, problems };
+}
+
+function recipeRunsDir(domain) {
+  return join(LOGS, domain, "runs");
+}
+
+// Unfinished runs of a task (not done / abandoned), oldest first.
+function recipeOpenRuns(domain, task) {
+  const dir = recipeRunsDir(domain);
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir)
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => readJson(join(dir, name)))
+    .filter((record) => record && record.task === task && record.status !== "done" && record.status !== "abandoned")
+    .sort((a, b) => String(a.startedAt).localeCompare(String(b.startedAt)));
+}
+
+function createRecipeRun(domain, task, profile, vars) {
+  const dir = recipeRunsDir(domain);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const now = new Date();
+  const pad = (value) => String(value).padStart(2, "0");
+  const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+  let run = `${stamp}-${task}`;
+  for (let n = 2; existsSync(join(dir, `${run}.json`)); n += 1) run = `${stamp}-${task}-${n}`;
+  return {
+    run,
+    domain,
+    task,
+    profile,
+    vars,
+    status: "running",
+    startedAt: now.toISOString(),
+    updatedAt: now.toISOString(),
+    current: null,
+    steps: [],
+    approved: [],
+    pausedBefore: null,
+    pausedAfter: null,
+    notes: [],
+    result: null,
+    error: null,
+  };
+}
+
+function saveRecipeRun(record) {
+  record.updatedAt = new Date().toISOString();
+  writeJson(join(recipeRunsDir(record.domain), `${record.run}.json`), record);
+}
+
+function recipeShellQuote(value) {
+  return /[^\w./=:-]/.test(value) ? `'${value.replace(/'/g, "'\\''")}'` : value;
+}
+
+function recipeCliPrefix() {
+  const launcher = join(dirname(dirname(SELF)), "bin", "browser");
+  return existsSync(launcher) ? recipeShellQuote(launcher) : `node ${recipeShellQuote(SELF)}`;
+}
+
+function recipeCli(argv, timeoutMs = 300_000) {
+  return new Promise((done) => {
+    const child = spawn(process.execPath, [SELF, ...argv], { env: process.env, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    child.stdout.on("data", (chunk) => (stdout += chunk));
+    child.stderr.on("data", (chunk) => (stderr += chunk));
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, timeoutMs);
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      done({ ok: false, error: { code: "spawn-failed", message: firstLine(error?.message || error) } });
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      try {
+        const parsed = JSON.parse(stdout.trim());
+        if (parsed && typeof parsed === "object") return done(parsed);
+      } catch {}
+      const message = timedOut ? `命令超过 ${timeoutMs / 1000} 秒没有结束` : (stderr.trim() || stdout.trim() || `exit ${code}`).slice(0, 800);
+      done({ ok: false, error: { code: timedOut ? "command-timeout" : "bad-output", message } });
+    });
+  });
+}
+
+const RECIPE_SCRIPT_COMMANDS = [
+  "open", "goto", "state", "focus", "snapshot", "query", "click", "drag", "fill", "press", "hover", "select",
+  "wait", "screenshot", "switch", "close", "mode", "dialog", "console", "network", "debug", "upload",
+];
+
+function recipeAuthCode(manualAuth) {
+  return manualAuth?.kind === "verification" ? "needs-verification" : "needs-login";
+}
+
+function recipeCommandError(error) {
+  const code = error?.code === "manual-auth-required" ? recipeAuthCode(error.diagnosis) : String(error?.code || "command-failed");
+  const wrapped = fail(code, String(error?.message || code));
+  if (error?.screenshot) wrapped.screenshot = error.screenshot;
+  return wrapped;
+}
+
+function recipeErrorInfo(error) {
+  const info = {
+    code: error instanceof ActionError || typeof error?.code === "string" ? String(error.code) : "script-error",
+    message: firstLine(error?.message || error),
+  };
+  if (error?.screenshot) info.screenshot = error.screenshot;
+  return info;
+}
+
+function recipeJson(value, what) {
+  if (value === undefined) return null;
+  try {
+    return JSON.parse(JSON.stringify(value));
+  } catch (error) {
+    throw fail("bad-value", `${what}的返回值不能 JSON 序列化: ${firstLine(error?.message || error)}`);
+  }
+}
+
+// Runs one browser command for a script: positional args go after `--`, a
+// trailing plain object becomes --kebab-flags; `dialog`/`dialogText` stay here.
+async function recipeCommand(ctx, name, args) {
+  if (ctx.halted) throw ctx.halt;
+  if (!ctx.active) throw fail("outside-step", `b.${name}() 必须写在 b.step(...) 里面`);
+  const list = [...args];
+  const last = list.at(-1);
+  const options = last && typeof last === "object" && Object.getPrototypeOf(last) === Object.prototype ? list.pop() : {};
+  for (const item of list) {
+    if (typeof item !== "string" && typeof item !== "number") {
+      throw fail("bad-argument", `b.${name}() 的位置参数只能是字符串或数字，最后一个参数才可以是选项对象`);
+    }
+  }
+  const { dialog: expected, dialogText, ...rest } = options;
+  if ("profile" in rest || "allowAuth" in rest) {
+    throw fail("bad-option", "脚本里不能写 profile 或 allowAuth：profile 由 recipe run 决定，代登录授权只能在 recipe run 命令行上加 --allow-auth");
+  }
+  const argv = [name];
+  for (const [key, value] of Object.entries(rest)) {
+    if (value === false || value === null || value === undefined) continue;
+    const flag = `--${key.replace(/[A-Z]/g, (char) => `-${char.toLowerCase()}`)}`;
+    if (value === true) argv.push(flag);
+    else argv.push(flag, String(value));
+  }
+  if (ctx.allowAuth && RECIPE_AUTH_ACTIONS.has(name)) argv.push("--allow-auth");
+  argv.push("--profile", ctx.profile, "--", ...list.map(String));
+  ctx.browserUsed = true;
+
+  const result = await recipeCli(argv);
+  if (result.ok === false) throw recipeCommandError(result.error);
+  if (result.status === "dialog-pending") {
+    const pending = result.pendingDialog || {};
+    const message = String(pending.message ?? "");
+    if (expected === undefined) {
+      throw fail("unexpected-dialog", `出现了没预料的 ${pending.type || ""} 弹窗：「${message}」；弹窗还开着，没有替你处理`);
+    }
+    const matched = expected instanceof RegExp ? expected.test(message) : message.includes(String(expected));
+    if (!matched) {
+      await recipeCli(["dialog", "dismiss", "--profile", ctx.profile]);
+      throw fail("dialog-mismatch", `弹窗内容和预期「${expected}」对不上，已取消：「${message}」`);
+    }
+    const accept = ["dialog", "accept", "--profile", ctx.profile];
+    if (dialogText !== undefined && dialogText !== null) accept.push("--text", String(dialogText));
+    const accepted = await recipeCli(accept);
+    if (accepted.ok === false) throw recipeCommandError(accepted.error);
+    if (accepted.status === "dialog-pending") {
+      const next = accepted.pendingDialog || {};
+      throw fail("unexpected-dialog", `确认弹窗后又弹出 ${next.type || ""} 弹窗：「${next.message ?? ""}」；弹窗还开着，没有替你处理`);
+    }
+    return accepted;
+  }
+  if (expected !== undefined) throw fail("dialog-missing", `预期会弹出「${expected}」的弹窗，但没有弹窗`);
+  if (result.manualAuth?.required === true) {
+    throw fail(recipeAuthCode(result.manualAuth), `页面需要用户${result.manualAuth.kind === "verification" ? "完成验证" : "登录"}`);
+  }
+  return result;
+}
+
+// Pause / stop / finish all end in the same internal exception (ctx.halt);
+// once ctx.halted is set every b.* call throws it again, so a script's own
+// try/catch cannot carry on past the stop.
+function haltRecipe(ctx, state) {
+  ctx.halted = state;
+  const record = ctx.record;
+  if (state.kind === "pause") {
+    record.status = "paused";
+    record.pausedBefore = state.before || null;
+    record.pausedAfter = state.after || null;
+  } else if (state.kind === "stop") {
+    record.status = "stopped";
+    record.everStopped = true;
+    record.error = { code: state.error.code, message: state.error.message };
+  }
+  saveRecipeRun(record);
+  throw ctx.halt;
+}
+
+function recordRecipeStep(record, entry) {
+  const index = record.steps.findIndex((item) => item.name === entry.name);
+  if (index >= 0) record.steps[index] = entry;
+  else record.steps.push(entry);
+}
+
+function recipeSummary(value) {
+  if (value === null || value === undefined) return "";
+  const text = typeof value === "string" ? value : JSON.stringify(value);
+  return text.length > 200 ? `${text.slice(0, 200)}…` : text;
+}
+
+function withRecipeDeadline(ctx, promise) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(
+      () => reject(fail("run-timeout", `整次运行超过 ${ctx.maxMinutes} 分钟（--max-minutes）`)),
+      Math.max(0, ctx.deadline - Date.now()),
+    );
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+async function runRecipeStep(ctx, name, fn, opts) {
+  const record = ctx.record;
+  if (ctx.halted) throw ctx.halt;
+  if (typeof name !== "string" || !name.trim()) throw fail("bad-step", "b.step 需要非空的步骤名");
+  if (typeof fn !== "function") throw fail("bad-step", `步骤「${name}」的第二个参数要是函数`);
+  if (ctx.active) throw fail("nested-step", `步骤「${ctx.active}」里不能再开步骤「${name}」`);
+  if (ctx.seen.has(name)) throw fail("duplicate-step", `步骤名重复: ${name}（循环里把序号写进名字）`);
+  ctx.seen.add(name);
+  const commit = opts?.commit === true;
+  const previous = record.steps.find((item) => item.name === name);
+  if (previous && (previous.status === "done" || previous.status === "skipped")) {
+    console.log(`· ${name}（已完成，沿用）`);
+    return previous.value;
+  }
+  if (commit) {
+    // A commit step done earlier in this run that the replay never reached was
+    // probably renamed; running the new name could submit a second time.
+    const missing = record.steps
+      .filter((item) => item.commit && !item.orphan && (item.status === "done" || item.status === "failed") && !ctx.seen.has(item.name))
+      .map((item) => item.name);
+    if (missing.length) {
+      const error = {
+        code: "commit-step-missing",
+        message: `记录里的提交步骤${missing.map((item) => `『${item}』`).join("、")}在脚本里找不到了，可能改了名；这一步也许已经做过`,
+      };
+      recordRecipeStep(record, { name, status: "failed", commit, ms: 0, value: null, hash: ctx.hash, error, missing });
+      record.current = name;
+      record.currentCommit = commit;
+      console.log(`✗ ${name} ${error.code}: ${error.message}`);
+      haltRecipe(ctx, { kind: "stop", step: name, commit, error });
+    }
+  }
+  if (commit && !ctx.verified && !record.approved.includes(name)) haltRecipe(ctx, { kind: "pause", before: name });
+
+  ctx.active = name;
+  record.current = name;
+  record.currentCommit = commit;
+  saveRecipeRun(record);
+  const started = Date.now();
+  let value;
+  try {
+    const raw = await withRecipeDeadline(ctx, Promise.resolve().then(fn));
+    if (ctx.halted) throw ctx.halt;
+    value = recipeJson(raw, `步骤「${name}」`);
+  } catch (error) {
+    ctx.active = null;
+    const ms = Date.now() - started;
+    if (error === ctx.halt && ctx.halted?.kind === "finish") {
+      value = ctx.halted.result;
+      recordRecipeStep(record, { name, status: "done", commit, ms, value, hash: ctx.hash });
+      record.current = null;
+      saveRecipeRun(record);
+      console.log(`✓ ${name} (${(ms / 1000).toFixed(1)}s) ${recipeSummary(value)}`.trimEnd());
+      throw ctx.halt;
+    }
+    if (ctx.halted) throw ctx.halt;
+    const info = recipeErrorInfo(error);
+    recordRecipeStep(record, { name, status: "failed", commit, ms, value: null, hash: ctx.hash, error: { code: info.code, message: info.message } });
+    console.log(`✗ ${name} ${info.code}: ${info.message}`);
+    haltRecipe(ctx, { kind: "stop", step: name, commit, error: info });
+  }
+  ctx.active = null;
+  const ms = Date.now() - started;
+  recordRecipeStep(record, { name, status: "done", commit, ms, value, hash: ctx.hash });
+  record.current = null;
+  saveRecipeRun(record);
+  console.log(`✓ ${name} (${(ms / 1000).toFixed(1)}s) ${recipeSummary(value)}`.trimEnd());
+  if (ctx.stepMode) haltRecipe(ctx, { kind: "pause", after: name });
+  return value;
+}
+
+function createRecipeApi(ctx) {
+  const check = () => {
+    if (ctx.halted) throw ctx.halt;
+  };
+  const b = {
+    domain: ctx.domain,
+    origin: ctx.origin,
+    profile: ctx.profile,
+    vars: Object.freeze({ ...ctx.vars }),
+    step: (name, fn, opts = {}) => runRecipeStep(ctx, name, fn, opts),
+    waitLogin: (...args) => recipeCommand(ctx, "wait-login", args),
+    waitVerification: (...args) => recipeCommand(ctx, "wait-verification", args),
+    async eval(source, arg) {
+      const expression = typeof source === "function" ? `(${source.toString()})(${JSON.stringify(arg ?? null)})` : String(source);
+      return (await recipeCommand(ctx, "eval", [expression])).result;
+    },
+    expect(condition, message) {
+      check();
+      if (!condition) throw fail("expect-failed", String(message || "核对不成立"));
+    },
+    async until(fn, { every = 30, max = 600 } = {}) {
+      check();
+      const started = Date.now();
+      for (;;) {
+        const value = await fn();
+        check();
+        if (value) return value;
+        const left = max * 1000 - (Date.now() - started);
+        if (left <= 0) throw fail("until-timeout", `等了 ${max} 秒仍没等到`);
+        await b.sleep(Math.min(every, left / 1000));
+      }
+    },
+    log(text) {
+      check();
+      const line = String(text);
+      if (line === ctx.lastLog) return;
+      ctx.lastLog = line;
+      console.log(`… ${line}`);
+      ctx.record.notes.push(line);
+      if (ctx.record.notes.length > 200) ctx.record.notes.splice(0, ctx.record.notes.length - 200);
+      saveRecipeRun(ctx.record);
+    },
+    finish(result) {
+      check();
+      ctx.halted = { kind: "finish", result: recipeJson(result, "b.finish") };
+      throw ctx.halt;
+    },
+    async sleep(seconds) {
+      check();
+      await sleep(Math.max(0, Number(seconds) || 0) * 1000);
+      check();
+    },
+  };
+  for (const name of RECIPE_SCRIPT_COMMANDS) b[name] = (...args) => recipeCommand(ctx, name, args);
+  return b;
+}
+
+function recipeIndexInfo(domain, task) {
+  const path = join(RECIPES, `${domain}.md`);
+  const text = existsSync(path) ? readFileSync(path, "utf8") : "";
+  const lines = text.split(/\r?\n/);
+  const section = recipeTasks(text).find((item) => item.title === task);
+  return {
+    path,
+    meta: parseExperienceMeta(text),
+    section,
+    lines: section ? lines.slice(section.headingIndex, section.endIndex) : [],
+    fields: section ? recipeSectionFields(lines.slice(section.headingIndex, section.endIndex)) : {},
+  };
+}
+
+// Prepares a stopped / paused / interrupted run for --resume. Returns an error or null.
+function prepareRecipeResume(record, flags) {
+  if (flags.skip && flags.retry) return { code: "bad-request", message: "--skip 和 --retry 只能带一个" };
+  if (record.status === "paused") {
+    if (record.pausedBefore && !record.approved.includes(record.pausedBefore)) record.approved.push(record.pausedBefore);
+    return null;
+  }
+  // stopped, or still "running": the previous process died inside `current`.
+  // An interrupted process counts as a stop, so this run will not be marked 已验证.
+  if (record.status === "running") record.everStopped = true;
+  const name = record.current;
+  if (!name) return null;
+  const entry = record.steps.find((item) => item.name === name);
+  const commit = entry ? Boolean(entry.commit) : Boolean(record.currentCommit);
+  if (commit && !flags.skip && !flags.retry) {
+    return {
+      code: "commit-ambiguous",
+      message: `「${name}」是提交步骤，可能已经生效：先到页面确认，已生效用 --resume --skip（需要时带 --value '<json>'），没生效用 --resume --retry`,
+    };
+  }
+  // The user has now decided about the renamed commit step; stop matching the old names.
+  if (entry?.error?.code === "commit-step-missing") {
+    for (const item of record.steps) if (entry.missing?.includes(item.name)) item.orphan = true;
+  }
+  if (flags.skip) {
+    let value = null;
+    if (flags.value !== undefined) {
+      try {
+        value = JSON.parse(String(flags.value));
+      } catch {
+        return { code: "bad-value", message: `--value 需要合法的 JSON: ${flags.value}` };
+      }
+    }
+    recordRecipeStep(record, { name, status: "skipped", commit, ms: 0, value, hash: null });
+  } else {
+    record.steps = record.steps.filter((item) => item.name !== name);
+  }
+  record.current = null;
+  return null;
+}
+
+async function recipeScriptRun(domain, task, file, flags) {
+  const base = { action: "recipe-run", domain, task };
+  const loaded = await loadRecipeScript(file);
+  if (loaded.error) return { ok: false, ...base, file, error: loaded.error };
+  const { meta } = loaded;
+  const index = recipeIndexInfo(domain, task);
+  const hash = recipeScriptHash(file);
+  const verified = index.fields["状态"] === `已验证 (${hash})`;
+
+  let record = null;
+  let vars;
+  if (flags.resume) {
+    if (flags.var) return { ok: false, ...base, error: { code: "bad-vars", message: "续跑沿用记录里的参数，不能再带 --var" } };
+    record = recipeOpenRuns(domain, task).at(-1) || null;
+    if (!record) return { ok: false, ...base, error: { code: "nothing-to-resume", message: "这个任务没有停下或暂停的运行记录可以续跑" } };
+    vars = record.vars || {};
+  } else {
+    const resolved = recipeResolveVars(meta, flags.var);
+    if (resolved.problems.length) {
+      return { ok: false, ...base, error: { code: "bad-vars", message: resolved.problems.join("；") }, params: recipeParamList(meta) };
+    }
+    vars = resolved.vars;
+  }
+  const profile = String(record?.profile || flags.profile || index.meta.profile || "");
+  if (flags["dry-run"]) {
+    const output = { ok: true, ...base, dryRun: true, desc: meta.desc, scope: meta.scope || "", params: vars, profile: profile || null, state: verified ? "已验证" : "未验证", file };
+    if (!profile) output.warning = "没有 profile：实跑时要加 --profile，或在索引 frontmatter 写 profile";
+    return output;
+  }
+  if (!profile) {
+    return { ok: false, ...base, error: { code: "no-profile", message: `没有 profile：加 --profile，或在 ${index.path} 的 frontmatter 写 profile` } };
+  }
+  if (!/^[a-zA-Z0-9._-]{1,64}$/.test(profile)) {
+    return { ok: false, ...base, error: { code: "bad-profile", message: "profile 只允许字母、数字、点、下划线和连字符" } };
+  }
+
+  if (record) {
+    const problem = prepareRecipeResume(record, flags);
+    if (problem) return { ok: false, ...base, error: problem, run: record.run, status: record.status, step: record.current || undefined };
+  } else {
+    const open = recipeOpenRuns(domain, task);
+    const latest = open.at(-1);
+    // Whatever the vars, a run that may have submitted must be resumed or explicitly dropped.
+    const submitted =
+      latest &&
+      (latest.steps.some((item) => item.commit && (item.status === "done" || item.status === "failed")) ||
+        (latest.status === "running" && latest.currentCommit));
+    if (submitted && !flags.new) {
+      const command = `${recipeCliPrefix()} recipe run ${domain} ${task}`;
+      const typed = (Array.isArray(flags.var) ? flags.var : []).map((item) => `--var ${recipeShellQuote(String(item))}`);
+      if (flags.profile) typed.push(`--profile ${recipeShellQuote(String(flags.profile))}`);
+      const step = latest.current || latest.pausedBefore || latest.pausedAfter || null;
+      return {
+        ok: false,
+        ...base,
+        error: {
+          code: "unfinished-run",
+          message: `上一次运行（${latest.run}）提交过但没跑完${step ? `，停在「${step}」` : ""}：接着那一次做用 --resume；确认那一次作废、从头再来用 --new。不管这次参数和上次是否相同都会拦`,
+        },
+        run: latest.run,
+        status: latest.status,
+        step,
+        vars: latest.vars,
+        resume: `${command} --resume`,
+        new: [command, ...typed, "--new"].join(" "),
+      };
+    }
+    for (const old of open) {
+      old.status = "abandoned";
+      saveRecipeRun(old);
+    }
+    record = createRecipeRun(domain, task, profile, vars);
+  }
+  record.status = "running";
+  record.error = null;
+  record.pausedBefore = null;
+  record.pausedAfter = null;
+  saveRecipeRun(record);
+
+  const maxMinutes = Math.max(0.1, numberFlag(flags["max-minutes"], 60));
+  const ctx = {
+    domain,
+    origin: index.meta.origin || `https://${domain}`,
+    profile,
+    vars,
+    record,
+    hash,
+    verified,
+    stepMode: Boolean(flags.step),
+    allowAuth: Boolean(flags["allow-auth"]),
+    maxMinutes,
+    deadline: Date.now() + maxMinutes * 60_000,
+    halt: Object.assign(new Error("脚本已暂停或停止"), { code: "recipe-halted" }),
+    halted: null,
+    active: null,
+    seen: new Set(),
+    lastLog: null,
+    browserUsed: false,
+  };
+  const started = Date.now();
+  try {
+    const value = await loaded.run(createRecipeApi(ctx), { ...vars });
+    if (!ctx.halted) ctx.halted = { kind: "finish", result: recipeJson(value, "run()") };
+  } catch (error) {
+    if (!ctx.halted) {
+      const info = recipeErrorInfo(error);
+      console.log(`✗ （步骤外） ${info.code}: ${info.message}`);
+      record.current = null;
+      ctx.halted = { kind: "stop", step: null, commit: false, error: info };
+      record.status = "stopped";
+      record.everStopped = true;
+      record.error = { code: info.code, message: info.message };
+      saveRecipeRun(record);
+    }
+  }
+  return finishRecipeRun(ctx, meta, flags, Date.now() - started);
+}
+
+function recipeVarsNote(vars) {
+  const text = Object.entries(vars || {})
+    .map(([key, value]) => `${key}=${String(value).replace(/\s+/g, " ").slice(0, 40)}`)
+    .join(" ");
+  return `[脚本] ${text}`.trim().slice(0, 200);
+}
+
+function finishRecipeRun(ctx, meta, flags, ms) {
+  const { domain, record, hash, profile } = ctx;
+  const task = record.task;
+  const base = { action: "recipe-run", domain, task };
+  const halted = ctx.halted;
+  const today = recipeToday();
+  const init = { desc: meta.desc, site: experienceSite(domain) };
+  const resume = `${recipeCliPrefix()} recipe run ${domain} ${task} --resume`;
+  // Only screenshot a browser that is already up; a script bug before any
+  // browser command should not launch Chrome just for a blank picture.
+  const screenshotNow = () => (existsSync(profilePaths(profile).daemon) ? captureRecipeFailure(domain, task, profile) : "");
+
+  if (halted.kind === "finish") {
+    record.status = "done";
+    record.result = halted.result;
+    record.current = null;
+    saveRecipeRun(record);
+    // Pauses before a commit step and --step pauses do not count; any stop (even if resumed later) does.
+    const verifiedNow = !record.everStopped && record.steps.every((item) => item.status === "done" && item.hash === hash);
+    editRecipeIndex(
+      domain,
+      task,
+      (fields) => ({
+        次数: (Number(fields["次数"]) || 0) + 1,
+        最近: today,
+        上次失败: "",
+        ...(verifiedNow ? { 状态: `已验证 (${hash})` } : {}),
+      }),
+      init,
+    );
+    appendLogLine(domain, task, "ok", recipeVarsNote(record.vars));
+    return { ok: true, ...base, result: halted.result, ms, run: record.run, state: verifiedNow || ctx.verified ? "已验证" : "未验证" };
+  }
+
+  if (halted.kind === "pause") {
+    const screenshot = screenshotNow();
+    const output = { ok: false, ...base, status: "paused" };
+    if (halted.before) {
+      output.before = halted.before;
+      output.reason = `脚本还没验证过，「${halted.before}」是提交步骤，执行前先停下：看截图和前面各步打出来的情况，确认没问题再续跑`;
+    } else {
+      output.after = halted.after;
+      output.reason = `--step 模式：「${halted.after}」已完成，看截图和输出确认后再续跑`;
+    }
+    if (screenshot) output.screenshot = screenshot;
+    output.run = record.run;
+    output.resume = `${resume}${flags.step ? " --step" : ""}`;
+    return output;
+  }
+
+  const { step, commit, error } = halted;
+  const where = step || "步骤外";
+  const screenshot = error.screenshot || screenshotNow();
+  editRecipeIndex(domain, task, () => ({ 上次失败: `${today}「${where}」${error.code}` }), init);
+  appendLogLine(domain, task, "failed", `[脚本] 停在「${where}」：${error.code}`);
+  const authHint = {
+    "needs-login": "页面要登录：请用户在可见窗口登录（mode headed，再 wait-login），登录好以后再续跑",
+    "needs-verification": "页面要做验证（滑块、验证码等）：请用户在可见窗口完成验证（mode headed，再 wait-verification），完成后再续跑",
+  }[error.code];
+  let hint;
+  if (error.code === "commit-step-missing") {
+    hint = `${error.message}。先到页面确认：如果只是改了名，把步骤名改回去，再 ${resume} --retry，会沿用原来的结果；确认这件事已经做过用 ${resume} --skip；确认还没做用 ${resume} --retry；或者用 --new 放弃这次从头来`;
+  } else if (commit) {
+    hint = `「${step}」是提交步骤，这一步可能已经生效，先到页面确认：确认已生效用 ${resume} --skip（后面要用这一步的返回值时加 --value '<json>'），确认没生效用 ${resume} --retry；单独 --resume 会被拒绝`;
+    if (authHint) hint = `${authHint}。${hint}`;
+  } else if (authHint) {
+    hint = `${authHint}：执行 resume 里的命令`;
+  } else if (error.code === "unexpected-dialog") {
+    hint = "弹窗还开着：读内容后自己决定 dialog accept 还是 dialog dismiss，处理完再续跑；以后预期会弹的，在脚本里给这条命令加 dialog 选项";
+  } else if (!step) {
+    hint = "脚本在步骤外出错，多半是脚本本身的问题：改好脚本后执行 resume 里的命令，已完成的步骤会沿用";
+  } else {
+    hint = `查清「${step}」失败的原因：页面状态的问题处理掉后用 resume 里的命令重做这一步；脚本的问题改好脚本再续跑；这一步已经手动做完就加 --skip`;
+  }
+  const output = {
+    ok: false,
+    ...base,
+    status: "stopped",
+    step,
+    error: { code: error.code, message: error.message },
+    committed: record.steps.filter((item) => item.commit && item.status === "done").map((item) => item.name),
+  };
+  if (screenshot) output.screenshot = screenshot;
+  output.run = record.run;
+  output.resume = resume;
+  output.hint = hint;
+  return output;
+}
+
+// Field lines shown as structured values, so `notes` leaves them out.
+const RECIPE_MAINTAINED_FIELDS = new Set(["说明", "次数", "最近", "状态", "上次失败", "不写脚本"]);
+
+// Tasks of one domain: the union of index sections and 脚本/<domain>/*.mjs.
+// A script that fails to load only marks its own task as 加载失败.
+async function recipeTaskEntries(domain) {
+  const path = join(RECIPES, `${domain}.md`);
+  const text = existsSync(path) ? readFileSync(path, "utf8") : "";
+  const lines = text.split(/\r?\n/);
+  const sections = recipeTasks(text);
+  const names = [...new Set([...sections.map((task) => task.title), ...recipeScriptNames(domain)])];
+  const entries = [];
+  for (const name of names) {
+    const section = sections.find((task) => task.title === name);
+    const sectionLines = section ? lines.slice(section.headingIndex, section.endIndex) : [];
+    const fields = recipeSectionFields(sectionLines);
+    const file = join(RECIPES, domain, `${name}.mjs`);
+    const scripted = existsSync(file);
+    const entry = {
+      task: name,
+      desc: fields["说明"] || "",
+      scope: "",
+      params: [],
+      usage: null,
+      count: section ? section.count : 0,
+      last: fields["最近"] || null,
+      state: "计数中",
+      lastFailure: fields["上次失败"] || null,
+      legacySteps: Boolean(section?.steps.length),
+      file: scripted ? file : null,
+    };
+    if (scripted) {
+      const loaded = await loadRecipeScript(file);
+      if (loaded.error) {
+        entry.state = "加载失败";
+        entry.error = loaded.error;
+      } else {
+        entry.desc = loaded.meta.desc;
+        entry.scope = loaded.meta.scope || "";
+        entry.params = recipeParamList(loaded.meta).map((param) => ({
+          name: param.name,
+          desc: param.desc,
+          required: param.required,
+          ...(param.default !== undefined ? { default: param.default } : {}),
+          ...(param.enum ? { enum: param.enum } : {}),
+        }));
+        entry.state = fields["状态"] === `已验证 (${recipeScriptHash(file)})` ? "已验证" : "未验证";
+      }
+    } else if (entry.legacySteps) {
+      entry.state = "未验证";
+      entry.params = section.params.map((param) => ({ name: param.name, desc: param.description, required: true }));
+    }
+    if (!scripted && fields["不写脚本"]) {
+      entry.state = "不写脚本";
+      entry.noScript = fields["不写脚本"];
+    }
+    if ((scripted && !entry.error) || (!scripted && entry.legacySteps)) {
+      const vars = entry.params.filter((param) => param.required).map((param) => `--var ${param.name}=…`);
+      entry.usage = [`${recipeCliPrefix()} recipe run ${domain} ${name}`, ...vars].join(" ");
+    }
+    const notes = sectionLines.slice(1).filter((line) => !RECIPE_MAINTAINED_FIELDS.has(line.match(RECIPE_FIELD_LINE)?.[1]));
+    entries.push({ entry, notes: notes.join("\n").trim(), steps: section?.steps || [] });
+  }
+  return { path, text, meta: parseExperienceMeta(text), sections, entries };
+}
+
+async function recipeListAction(filter) {
   ensureRecipesDir();
   const needle = String(filter || "").toLowerCase();
+  const domains = new Set();
+  for (const item of readdirSync(RECIPES, { withFileTypes: true })) {
+    if (item.isFile() && item.name.endsWith(".md")) domains.add(item.name.slice(0, -3));
+    else if (item.isDirectory()) domains.add(item.name);
+  }
   const recipes = [];
-  for (const entry of readdirSync(RECIPES, { withFileTypes: true })) {
-    if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
-    const domain = entry.name.replace(/\.md$/, "");
+  for (const domain of [...domains].sort()) {
     if (!/^[a-z0-9.-]+$/.test(domain)) continue;
     if (needle && !domain.includes(needle)) continue;
-    const path = join(RECIPES, entry.name);
-    const text = readFileSync(path, "utf8");
-    const meta = parseExperienceMeta(text);
+    const info = await recipeTaskEntries(domain);
     recipes.push({
       domain,
-      path,
-      site: meta.site || "",
-      app: meta.app || "",
-      environment: meta.environment || "",
-      updated: meta.updated || "",
-      tasks: recipeTasks(text).map((task) => ({
-        title: task.title,
-        count: task.count,
-        recorded: task.steps.length > 0,
-        params: task.params.map((param) => param.name),
+      path: info.path,
+      site: info.meta.site || "",
+      app: info.meta.app || "",
+      environment: info.meta.environment || "",
+      updated: info.meta.updated || "",
+      tasks: info.entries.map(({ entry }) => ({
+        task: entry.task,
+        state: entry.state,
+        count: entry.count,
+        params: entry.params.map((param) => param.name),
       })),
     });
   }
-  recipes.sort((a, b) => a.domain.localeCompare(b.domain));
   return { ok: true, action: "recipe-list", directory: RECIPES, recipes };
 }
 
-function recipeShowAction(domainInput, wanted) {
+async function recipeShowAction(domainInput, wanted) {
   const domain = normalizeDomain(domainInput);
-  const path = recipePath(domain);
-  if (!existsSync(path)) {
+  ensureRecipesDir();
+  const info = await recipeTaskEntries(domain);
+  const { path } = info;
+  if (!info.entries.length) {
     return { ok: true, action: "recipe-show", found: false, domain, path, tasks: [] };
   }
-  const content = readFileSync(path, "utf8");
-  const tasks = recipeTasks(content);
   if (!wanted) {
-    return {
-      ok: true,
-      action: "recipe-show",
-      found: true,
-      domain,
-      path,
-      meta: parseExperienceMeta(content),
-      tasks: tasks.map(({ title, count, params, steps }) => ({
-        title,
-        count,
-        params,
-        recorded: steps.length > 0,
-      })),
-    };
+    return { ok: true, action: "recipe-show", found: true, domain, path, meta: info.meta, tasks: info.entries.map(({ entry }) => entry) };
   }
-  const task = pickRecipeTask(tasks, wanted);
-  if (!task) {
+  // Exact name first; old-style section titles still match loosely.
+  let found = info.entries.find(({ entry }) => entry.task === wanted);
+  if (!found) {
+    const legacy = pickRecipeTask(info.sections, wanted);
+    if (legacy) found = info.entries.find(({ entry }) => entry.task === legacy.title);
+  }
+  if (!found) {
     return {
       ok: false,
       action: "recipe-show",
       domain,
       path,
       error: { code: "recipe-task-not-found", message: `没有找到任务: ${wanted}` },
-      available: tasks.map((item) => item.title),
+      available: info.entries.map(({ entry }) => entry.task),
     };
   }
-  return {
-    ok: true,
-    action: "recipe-show",
-    found: true,
-    domain,
-    path,
-    task: { title: task.title, count: task.count, params: task.params, steps: task.steps },
-  };
+  const task = { ...found.entry, notes: found.notes };
+  if (found.entry.legacySteps) task.steps = found.steps;
+  return { ok: true, action: "recipe-show", found: true, domain, path, meta: info.meta, task };
 }
 
 function recipeLogAction(domainInput, wanted) {
@@ -3175,19 +4154,11 @@ function recipeLogAction(domainInput, wanted) {
   }
   const section = lines.slice(task.headingIndex, task.endIndex);
   const count = task.count + 1;
-  let countIndex = section.findIndex((line) => /^\s*[-*]\s*次数\s*[:：]/.test(line));
-  if (countIndex >= 0) {
-    section[countIndex] = section[countIndex].replace(/(次数\s*[:：]\s*)\d+/, `$1${count}`);
-  } else {
-    section.splice(1, 0, `- 次数: ${count}`);
-    countIndex = 1;
-  }
-  const today = new Date().toISOString().slice(0, 10);
-  const recentIndex = section.findIndex((line) => /^\s*[-*]\s*最近\s*[:：]/.test(line));
-  if (recentIndex >= 0) section[recentIndex] = `- 最近: ${today}`;
-  else section.splice(countIndex + 1, 0, `- 最近: ${today}`);
+  const today = recipeToday();
+  setRecipeSectionField(section, "次数", count);
+  setRecipeSectionField(section, "最近", today);
   lines.splice(task.headingIndex, task.endIndex - task.headingIndex, ...section);
-  writeFileSync(path, lines.join("\n") + (text.endsWith("\n") ? "\n" : ""));
+  writeRecipeIndex(path, lines);
 
   const recorded = task.steps.length > 0;
   const result = { ok: true, action: "recipe-log", domain, path, task: task.title, count, recorded, updated: today };
@@ -3200,6 +4171,8 @@ function recipeLogAction(domainInput, wanted) {
 async function recipeRunAction(domainInput, wanted, flags) {
   const domain = normalizeDomain(domainInput);
   const path = recipePath(domain);
+  const scriptFile = RECIPE_TASK_NAME.test(String(wanted || "")) ? join(RECIPES, domain, `${wanted}.mjs`) : "";
+  if (scriptFile && existsSync(scriptFile)) return recipeScriptRun(domain, String(wanted), scriptFile, flags);
   if (!existsSync(path)) {
     return { ok: false, action: "recipe-run", domain, path, error: { code: "recipe-not-found", message: `还没有脚本文件: ${path}` } };
   }
@@ -3393,7 +4366,7 @@ function logHeader(domain) {
     `# ${domain} 验证日志`,
     "",
     "> 固定格式（一行一次）：`- YYYY-MM-DD HH:mm | 任务 | 结果(ok|failed|partial) | 备注`",
-    '> 只追加，不改历史行；命令：`browser log add <domain> "<任务>" --result ok [--note "..."]`',
+    '> 只追加，不改历史行；命令：`browser log add <domain> "<任务>" --result ok (--task <任务名> | --one-off) [--note "..."]`',
     "> 历史记录从 `experiences/<domain>.md` 的「验证记录」迁入，原样保留。",
     "",
     "## 记录",
@@ -3438,7 +4411,57 @@ function logAddAction(domainInput, taskText, flags) {
   if (!result) {
     return { ok: false, action: "log-add", domain, error: { code: "bad-result", message: "--result 需要 ok、failed 或 partial" } };
   }
-  const note = String(flags.note || "").replace(/\s+/g, " ").trim();
+  const recipeTask = typeof flags.task === "string" ? flags.task.trim() : "";
+  if (Boolean(recipeTask) === Boolean(flags["one-off"])) {
+    return {
+      ok: false,
+      action: "log-add",
+      domain,
+      error: {
+        code: "need-task",
+        message: recipeTask
+          ? "--task 和 --one-off 只能带一个"
+          : "log add 需要 --task <任务名> 或 --one-off（二选一）：会重复做的操作给任务名（小写字母、数字、下划线，如 deploy_tag），一次性的操作用 --one-off",
+      },
+    };
+  }
+  if (recipeTask && !RECIPE_TASK_NAME.test(recipeTask)) {
+    return { ok: false, action: "log-add", domain, error: { code: "bad-task", message: `任务名只能用小写字母、数字、下划线，且以字母开头: ${recipeTask}` } };
+  }
+  let note = String(flags.note || "").replace(/\s+/g, " ").trim();
+  if (recipeTask) note = `[${recipeTask}] ${note}`.trim();
+  const { path, at } = appendLogLine(domain, task, result, note);
+  const output = { ok: true, action: "log-add", domain, path, entry: { at, task, result, note } };
+  if (!recipeTask || result !== "ok") return output;
+
+  const otherTasks = recipeTaskNames(domain).filter((name) => name !== recipeTask);
+  const scripted = existsSync(join(RECIPES, domain, `${recipeTask}.mjs`));
+  const today = recipeToday();
+  const index = editRecipeIndex(domain, recipeTask, (fields) => ({ 次数: (Number(fields["次数"]) || 0) + 1, 最近: today }), {
+    desc: task,
+    site: experienceSite(domain),
+  });
+  const count = Number(index.fields["次数"]);
+  const isNew = index.created && !scripted;
+  const noScript = index.fields["不写脚本"];
+  let hint;
+  if (scripted) {
+    hint = `已有脚本 脚本/${domain}/${recipeTask}.mjs：下次先 recipe run ${domain} ${recipeTask}；这次要是脚本覆盖不了的用法，就在原脚本上加参数，不要另起任务`;
+  } else if (noScript) {
+    hint = `这个任务标了不写脚本：${noScript}`;
+  } else if (count >= 3) {
+    hint = `已做 ${count} 次：现在把这次的步骤写成 脚本/${domain}/${recipeTask}.mjs（模板在 references/recipe-template.mjs），写完先 recipe run ${domain} ${recipeTask} --dry-run；只读的任务当场实跑一次核对`;
+  } else {
+    hint = `已记 ${count} 次，再做 ${3 - count} 次就该写成脚本`;
+  }
+  if (isNew && otherTasks.length) hint += `。确认不是这些已有任务的另一种说法：${otherTasks.join("、")}`;
+  output.recipe = { task: recipeTask, count, scripted, isNew, otherTasks };
+  output.recipePath = index.path;
+  output.hint = hint;
+  return output;
+}
+
+function appendLogLine(domain, task, result, note) {
   ensureLogsDir();
   const dir = join(LOGS, domain);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -3446,7 +4469,7 @@ function logAddAction(domainInput, taskText, flags) {
   if (!existsSync(path)) writeFileSync(path, logHeader(domain), { mode: 0o600 });
   const at = logNow();
   appendFileSync(path, `- ${at} | ${task} | ${result}${note ? ` | ${note}` : ""}\n`);
-  return { ok: true, action: "log-add", domain, path, entry: { at, task, result, note } };
+  return { path, at };
 }
 
 function logShowAction(domainInput, flags) {
@@ -3494,8 +4517,6 @@ function logListAction() {
 
 let currentProfile = DEFAULT_PROFILE;
 let currentHeadless = true;
-let dialogPolicy = "dismiss";
-let nextDialogText = "";
 let daemonServer = null;
 let shuttingDown = false;
 let switchingMode = false;
@@ -3522,6 +4543,38 @@ async function shutdown(code = 0) {
   } catch {}
   logLine("daemon stopped");
   process.exit(code);
+}
+
+async function runAction(path, body) {
+  switch (path) {
+    case "/state": return stateAction();
+    case "/open": return openAction(body);
+    case "/goto": return gotoAction(body);
+    case "/snapshot": return snapshotAction(body);
+    case "/click": return clickAction(body);
+    case "/eval": return evalAction(body);
+    case "/drag": return dragAction(body);
+    case "/fill": return fillAction(body);
+    case "/upload": return uploadAction(body);
+    case "/press": return pressAction(body);
+    case "/hover": return hoverAction(body);
+    case "/select": return selectAction(body);
+    case "/wait": return waitAction(body);
+    case "/annotate": return annotateAction(body);
+    case "/screenshot": return screenshotAction(body);
+    case "/switch": return switchAction(body);
+    case "/close": return closeAction();
+    case "/focus": return focusAction();
+    case "/mode": return switchModeAction(body);
+    case "/wait-login": return waitLoginAction(body);
+    case "/console": return consoleAction(body);
+    case "/network": return networkAction(body);
+    case "/debug": return debugAction(body);
+    case "/query": return queryAction(body);
+    case "/wait-verification": return waitVerificationAction(body);
+    default:
+      throw fail("unknown-command", `unknown command: ${path}`);
+  }
 }
 
 async function runDaemon(flags) {
@@ -3556,7 +4609,7 @@ async function runDaemon(flags) {
           ok: true,
           profile: currentProfile,
           headless: currentHeadless,
-          dialogPolicy,
+          pendingDialog: pendingDialog() ? dialogInfo(pendingDialog()) : null,
           pid: process.pid,
           url: maskUrl(getPage().url()),
           title: await getPage().title().catch(() => ""),
@@ -3582,50 +4635,37 @@ async function runDaemon(flags) {
       }
 
       const path = request.url || "/";
+      if (path === "/stop") {
+        response.end(JSON.stringify({ ok: true, action: "stop" }));
+        setTimeout(() => void shutdown(0), 100);
+        return;
+      }
       try {
         let result;
-        switch (path) {
-          case "/state": result = await stateAction(); break;
-          case "/open": result = await openAction(body); break;
-          case "/goto": result = await gotoAction(body); break;
-          case "/snapshot": result = await snapshotAction(body); break;
-          case "/click": result = await clickAction(body); break;
-          case "/eval": result = await evalAction(body); break;
-          case "/drag": result = await dragAction(body); break;
-          case "/fill": result = await fillAction(body); break;
-          case "/press": result = await pressAction(body); break;
-          case "/hover": result = await hoverAction(body); break;
-          case "/select": result = await selectAction(body); break;
-          case "/wait": result = await waitAction(body); break;
-          case "/annotate": result = await annotateAction(body); break;
-          case "/screenshot": result = await screenshotAction(body); break;
-          case "/switch": result = await switchAction(body); break;
-          case "/close": result = await closeAction(); break;
-          case "/focus": result = await focusAction(); break;
-          case "/mode": result = await switchModeAction(body); break;
-          case "/wait-login": result = await waitLoginAction(body); break;
-          case "/console": result = await consoleAction(body); break;
-          case "/dialog": result = await dialogAction(body); break;
-          case "/network": result = await networkAction(body); break;
-          case "/debug": result = await debugAction(body); break;
-          case "/query": result = await queryAction(body); break;
-          case "/wait-verification": result = await waitVerificationAction(body); break;
-          case "/stop":
-            response.end(JSON.stringify({ ok: true, action: "stop" }));
-            setTimeout(() => void shutdown(0), 100);
-            return;
-          default:
-            throw fail("unknown-command", `unknown command: ${path}`);
+        const waiting = pendingDialog();
+        if (path === "/dialog") {
+          result = await dialogAction(body);
+        } else if (waiting && path !== "/console" && path !== "/network") {
+          throw fail(
+            "dialog-pending",
+            `页面上有 ${waiting.record.type} 弹窗在等处理：「${waiting.record.message}」。先 dialog accept（prompt 用 --text）或 dialog dismiss，再做别的操作`,
+            dialogInfo(waiting),
+          );
+        } else {
+          result = await untilDialog(path.slice(1), runAction(path, body));
         }
         response.end(JSON.stringify(result));
       } catch (error) {
         let screenshot = null;
-        try {
-          const shot = await screenshotAction({
-            path: join(SHOTS, `error-${currentProfile}-${new Date().toISOString().replace(/[:.]/g, "-")}.png`),
-          });
-          screenshot = shot.path;
-        } catch {}
+        // With a dialog open the screenshot would hang the response.
+        if (!pendingDialog()) {
+          try {
+            const shot = await screenshotAction({
+              path: join(SHOTS, `error-${currentProfile}-${new Date().toISOString().replace(/[:.]/g, "-")}.png`),
+            });
+            screenshot = shot.path;
+          } catch {}
+        }
         const recent = {
           recentConsole: diagnostics.console.slice(-15),
           recentNetwork: diagnostics.network.slice(-20),
@@ -3763,6 +4803,12 @@ function parseArgs(argv) {
     "all-attrs",
     "dry-run",
     "no-focus",
+    "step",
+    "resume",
+    "skip",
+    "retry",
+    "new",
+    "one-off",
   ]);
   for (let index = 0; index < argv.length; index++) {
     const arg = argv[index];
@@ -3813,7 +4859,10 @@ async function main() {
 
   const command = positional.shift();
   if (!command) {
-    console.error("用法: browser <open|state|snapshot|query|click|eval|drag|fill|press|hover|select|wait|screenshot|annotate|switch|wait-login|console|network|debug|wait-verification|mode|focus|close|experience|recipe|log|restore-session|fingerprint|stop|status|profiles> ...");
+    console.error("用法: browser <open|state|snapshot|query|click|eval|drag|fill|upload|press|hover|select|wait|screenshot|annotate|switch|wait-login|console|network|debug|wait-verification|mode|focus|close|experience|recipe|log|restore-session|fingerprint|stop|status|profiles> ...");
+    console.error("  upload <selector> <file> [file2 ...] [--frame CSS] [--timeout ms]");
+    console.error("  recipe <list|show|log|run> <domain> [task]；recipe run 另有 --var k=v --dry-run --step --resume [--skip [--value json] | --retry] --new --max-minutes N");
+    console.error('  log add <domain> "<描述>" --result ok|failed|partial (--task <任务名> | --one-off) [--note ...]');
     process.exit(2);
   }
 
@@ -3846,15 +4895,19 @@ async function main() {
     const value = positional[0] || flags.domain || "";
     const wanted = positional[1] || flags.task || "";
     let result;
-    if (sub === "list") result = recipeListAction(value);
-    else if (sub === "show") result = recipeShowAction(value, wanted);
+    if (sub === "list") result = await recipeListAction(value);
+    else if (sub === "show") result = await recipeShowAction(value, wanted);
     else if (sub === "log") result = recipeLogAction(value, wanted);
     else if (sub === "run") result = await recipeRunAction(value, wanted, flags);
     else
       result = {
         ok: false,
         action: "recipe",
-        error: { code: "unknown-command", message: "用法: recipe <list|show|log|run> <domain> [task]" },
+        error: {
+          code: "unknown-command",
+          message:
+            "用法: recipe <list|show|log|run> <domain> [task]；recipe run <domain> <task> [--var k=v]... [--profile p] [--dry-run] [--step] [--allow-auth] [--max-minutes N] [--new]，续跑: recipe run <domain> <task> --resume [--skip [--value json] | --retry] [--step]",
+        },
       };
     print(result);
     if (result.ok === false) process.exit(1);
@@ -3872,7 +4925,7 @@ async function main() {
       result = {
         ok: false,
         action: "log",
-        error: { code: "unknown-command", message: '用法: log <add|show|list> <domain> [任务]（add 需要 --result ok|failed|partial）' },
+        error: { code: "unknown-command", message: '用法: log <add|show|list> <domain> [任务]（add 需要 --result ok|failed|partial，以及 --task <任务名> 或 --one-off 二选一）' },
       };
     print(result);
     if (result.ok === false) process.exit(1);
@@ -4079,6 +5132,18 @@ async function main() {
         allowAuth: Boolean(flags["allow-auth"]),
         timeout,
       });
+      break;
+    }
+    case "upload": {
+      const selector = positional[0];
+      if (!selector || positional.length < 2) throw new Error("upload 需要 selector 和至少一个文件");
+      const files = positional.slice(1).map((file) => resolve(file));
+      const missing = files.filter((file) => !existsSync(file) || !statSync(file).isFile());
+      if (missing.length) {
+        result = { ok: false, action: "upload", error: { code: "file-not-found", message: `文件不存在或不是普通文件: ${missing.join(", ")}` } };
+        break;
+      }
+      result = await requestDaemon(info, "/upload", { selector, files, frame: flags.frame || "", timeout });
       break;
     }
     case "press": {

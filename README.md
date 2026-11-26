@@ -1,40 +1,76 @@
 <h1 align="center">BrowserOperator</h1>
 
-<p align="center"><strong>One skill. Different websites. Your agent handles the task.</strong></p>
+<p align="center"><strong>Let your agent work in the browser for you.</strong></p>
 
 <p align="center">
   <a href="README_CN.md">中文</a> ·
-  <a href="#how-it-adapts-to-different-websites-and-tasks">How it adapts</a> ·
+  <a href="#what-can-it-do">Use cases</a> ·
   <a href="#quick-start">Quick start</a> ·
-  <a href="#things-to-try">Things to try</a> ·
+  <a href="#key-features">Key features</a> ·
+  <a href="#how-does-it-compare-with-codexs-browser-tools">Compare with Codex</a> ·
   <a href="skills/browser-operator/references/usage.md">User guide</a>
 </p>
 
-Research a topic, compare products, collect job descriptions, or fill out a form in your dashboard. Give your agent a goal and let it work through the pages.
+BrowserOperator is a browser skill. Once installed, your agent can use Chrome to search for information, read pages, fill forms, and save screenshots.
 
-BrowserOperator gives your agent control of local Chrome. It reads the current page, finds controls and content, then combines clicks, form input, selections, dragging, and tab switching. On a different site or task, the agent can inspect the page again, choose its steps, and check the result.
+It uses Playwright and the Chrome DevTools Protocol to read the DOM, locate elements, and perform actions such as mouse clicks and keyboard input. Console and Network records help diagnose failures. Browser sessions can persist, while the skill instructs your agent to save site knowledge and turn repeatedly verified workflows into replayable recipes.
 
-![Actual BrowserOperator actions: search a library, filter products, and fill and save a form](skills/browser-operator/references/assets/browser-operator-demo.gif)
+Describe the goal and how to check it. Your agent plans the steps, operates the page, verifies the outcome, and records procedures it can reuse later.
 
-*Three local sample pages with different layouts, edited from screenshots of actual CLI actions: search and read results, filter and select products, then fill a form and reopen the page to check the saved record.*
+## What can it do?
 
-## How it adapts to different websites and tasks
+BrowserOperator provides browser actions. Your agent can combine them with your instructions and materials for workflows such as:
 
-**Start with the page in front of you.** BrowserOperator uses Playwright and the Chrome DevTools Protocol to read page structure (the DOM), returning text, element attributes, and locators. The agent uses that information to choose its next action, so the same tools work across different sites. When a page changes, it can inspect the structure again and adjust the steps.
+### Shop and place orders
 
-**Combine small actions into a task.** Reading, searching, filling forms, dragging, and working with tabs and iframes can be combined: open details from a list, collect information from several pages, or fill a form and query the result again. You describe the goal and how to check it; the agent plans the steps.
+Visit shopping sites, find products, compare prices and specifications, and choose variants and quantities. Check the items, total, and shipping details, then submit the order as you instruct.
 
-**Keep verified procedures for later.** The skill tells the agent to save entry points, selectors, ways to read results, and common problems. Later sessions consult those notes first. After the same task succeeds over several runs, its steps can become a recipe with parameters.
+> Compare three mechanical keyboards under CNY 500. List their prices, layouts, switches, connectivity, and product links, and explain the main differences.
 
-BrowserOperator provides browser actions and tools for keeping notes. Your chosen agent understands the task and plans the work. Success still depends on its judgment, the page structure, and the access available.
+### Run UI regression tests
+
+Follow test cases to search, fill forms, and submit data, then check success messages, navigation, and resulting data. Capture screenshots at key steps and collect page state, console errors, and request details when something fails.
+
+For example, run “search → open details → edit a form → save → search again” to confirm that a change persisted. Include required-field validation, empty results, and error messages when relevant.
+
+> In the test environment, find the specified test customer, edit and save its notes, then reopen the details to check the result. Check the warning for an empty required field, capture key screenshots, and restore the test data afterward.
+
+When a button cannot be clicked, your agent can check for overlays, visibility, or a disabled state. If a submission appears to do nothing, it can inspect Console errors alongside Network status codes, timing, and failures.
+
+### Research job descriptions and tailor a resume
+
+Search job sites or web-based recruiting tools, filter by city, experience, and salary, then open job details. Collect company names, responsibilities, technology requirements, qualifications, salary ranges, and original links.
+
+> Find Java backend roles in Shanghai, prioritizing positions asking for 3–5 years of experience and paying CNY 20–30K per month. Read each JD and make a table with the original links. Mark information that is not published as “not specified.”
+
+Your agent can then use your existing resume and actual experience to identify relevant skills, highlight projects, refine the emphasis, and draft a resume for the target role.
+
+> Tailor my project descriptions to these JDs, emphasizing my actual Java, Spring Boot, and database optimization experience. List skill gaps separately; do not invent projects or work history.
+
+Job sites often require authentication or apply anti-bot checks. BrowserOperator provides a stable browser fingerprint and compatibility measures for some automation checks; valid login sessions can be reused. When it detects a slider or CAPTCHA while opening a page, it switches to a visible browser so you can complete verification before the agent checks the page and continues.
+
+### Operate a web release platform
+
+Use your web release platform or GitLab CI/CD pages to release your chosen environment, branch, and version: open the project, select the version, fill in parameters, trigger the pipeline, and inspect stage status and job logs.
+
+> Open the project's GitLab page and release the release/1.5 branch to the specified test environment. Check the environment and branch before triggering the corresponding pipeline. Wait for completion and report its link, outcome, and the key errors from any failed steps.
+
+If a job fails, your agent can open it and summarize errors from the build, test, or deployment steps. Afterward, follow the project's existing verification procedure to open the app, check key features, or verify its version. Pipeline success and a working application need separate checks.
+
+Stable release procedures can become recipes with environment, branch, or version parameters. A recipe stops at the step that fails and leaves the page open for diagnosis, then resumes from that step once the cause is fixed.
 
 ## Quick start
 
-### Install
+### Requirements
 
-Ask your agent to install this repository into its skills directory:
+- Node.js 20 or later and npm.
+- Google Chrome installed; use `CHROME_PATH` to specify its location if needed.
+- An agent that can read skills and execute local commands.
+- macOS, Linux, or Windows. The launcher uses Bash, so Windows needs an environment such as Git Bash. Without Bash, run `node <skill-directory>/scripts/browser.mjs ...` directly.
 
-> Install the browser-operator skill from https://github.com/LearnAIHubC/BrowserOperator.git, install its dependencies, and tell me how to start using it after restarting.
+### Install the skill
+
+Ask your agent to install [https://github.com/LearnAIHubC/BrowserOperator.git](https://github.com/LearnAIHubC/BrowserOperator.git).
 
 Or run this in a terminal:
 
@@ -42,98 +78,29 @@ Or run this in a terminal:
 npx --yes github:LearnAIHubC/BrowserOperator
 ```
 
-The installer defaults to `${DSH_HOME:-$HOME/.dsh}/skills/browser-operator`, installs dependencies, and creates a launcher. For an agent with a different skills directory, pass its parent directory with `--dest`. The installer creates `browser-operator/` inside it:
+By default, the installer uses `${DSH_HOME:-$HOME/.dsh}/skills/browser-operator`, installs dependencies, and creates a command-line launcher. Restart your agent afterward so it loads the skill.
+
+For an agent with a different skills directory, pass that parent directory with `--dest`. The installer creates `browser-operator/` inside it:
 
 ```bash
 npx --yes github:LearnAIHubC/BrowserOperator --dest /path/to/your-agent/skills
 ```
 
-Restart your agent so it loads the skill. To update an installation, add `--force` to the original command. See the [user guide](skills/browser-operator/references/usage.md) for other options.
+To update an existing installation, add `--force` to the original install command. See the [user guide](skills/browser-operator/references/usage.md) for manual installation and other options.
 
-### Try a task
+### Start using it
 
-Choose a site you use and describe what to do and what to check:
+Tell your agent:
 
-> Use BrowserOperator to open the site I specify, search for a keyword, and read the first three results in detail. Collect their titles, key points, and source links. After succeeding, save the site's procedure for next time.
+> Open Baidu and search for xxx.
 
-### Requirements
+For a more specific task, include the goal and acceptance criteria:
 
-- Node.js 20 or later, npm, and Google Chrome. Set `CHROME_PATH` if you need to specify Chrome's location.
-- An agent that can read skills and execute local commands.
-- macOS, Linux, or Windows. The launcher uses Bash, so Windows needs an environment such as Git Bash. Without Bash, run `node <skill-directory>/scripts/browser.mjs ...` directly.
+> Use BrowserOperator to open my test dashboard, search for a record using the specified filters, open its details, and save a screenshot. Check that the details match the list entry, then record the procedure in the site's notes.
 
-## Things to try
+### Inspect a page and save a screenshot
 
-These are task examples. Substitute your own sites, materials, and requirements.
-
-### Research across several pages
-
-> Find material about browser automation on the sites I specify. Open and read each page, group the main points by use, and keep the source links. Mark information that is not published as “not specified.”
-
-### Compare products that fit your needs
-
-> Compare three mechanical keyboards under CNY 500. Read the product details and list prices, layouts, switches, connectivity, and product links. Explain the main differences.
-
-### Find jobs and tailor a resume to your actual experience
-
-> Find Java backend roles in Shanghai, prioritizing positions asking for 3–5 years of experience and paying CNY 20–30K per month. Collect the JDs and original links, then use my resume to highlight relevant experience. List skill gaps separately; do not invent projects or work history.
-
-BrowserOperator handles browsing and reading. Your agent uses the information and materials you provide to organize findings, compare options, or rewrite a resume.
-
-### Update a dashboard and check the saved result
-
-> Open the test dashboard, find the specified record, update its notes with the text I provide, and save. Reopen the details to confirm the change, capture key screenshots, and restore the test data afterward.
-
-The same tools can support development and operations tasks, such as UI regression checks or reading GitLab pipelines and failed job logs. Check whether a released application works using the project's existing verification procedure.
-
-### Point to the part of the page you mean
-
-> Open a visible browser window so I can mark the area I want to work with. Read my selection, tell me which text and controls are inside it, then continue with my instructions.
-
-Use the “圈选标注” button at the bottom right to draw a rectangle. The agent calls `annotate read` to read elements, text, CSS selectors, and positions in the selected area. The annotation setting is saved and remains in effect across navigation and browser restarts.
-
-## Less repeated work on later visits
-
-### Read saved notes before exploring a site
-
-Entry points, search controls, result lists, ways to read details, and common problems are saved in local Markdown files for later sessions. Notes for the same app in different environments can be linked; URLs, accounts, and institution IDs still need checking in the current environment.
-
-### Change parameters and repeat a familiar task
-
-On the third successful run of the same task, the skill tells the agent to save verified steps as a recipe. Later, change the search term, environment, branch, or version and execute the steps with `recipe run`.
-
-The agent writes and maintains recipes; the CLI substitutes parameters and runs the steps. If a step fails, execution stops and the current page stays open for you or the agent to continue. Site changes can require updates to the recipe.
-
-### Keep your login state
-
-Use separate browser profiles for sites or accounts to save cookies and local storage. Later visits can reuse a login while its session remains valid.
-
-Chrome runs headlessly by default. When it detects login or verification while opening a page, it switches to a visible window. Sites using session cookies can enable `restore-session`; recovery after a restart still depends on a valid server-side session. See [login persistence](skills/browser-operator/references/usage.md#login-persistence).
-
-### Inspect failures with page and request records
-
-Before clicking, the tool checks whether the element can be operated and whether it is covered. Commands report page changes; the agent still needs to check the actual result, such as saved data or a success message.
-
-For diagnosis, `debug` collects page state, a screenshot, and recent Console and Network records. Network records contain request URLs, status, timing, and failure reasons. Request headers and bodies are not recorded by default.
-
-## Before you use it
-
-- By default, you log in through the visible browser window. The agent can perform login actions only when you explicitly ask it to in the current conversation. You always complete sliders and CAPTCHAs yourself. Detection uses page features and can be wrong, so check the actual page state.
-- Each profile keeps a stable browser fingerprint, with adjustments for some automation checks and false positives from developer-tools detection. Sites can still restrict access under their own rules.
-- Pages with limited DOM information or unusual controls may need extra handling. Changed layouts, pop-ups, and loading behavior can invalidate saved steps.
-- Browser data, default screenshots, site notes, recipes, annotation records, and logs are stored locally. The default data directory is `~/.dsh/browser-operator/`.
-
-## Learn more
-
-- [User guide](skills/browser-operator/references/usage.md): manual installation, full commands, login recovery, data locations, and configuration.
-- [Skill instructions](skills/browser-operator/SKILL.md): procedures and rules for the agent.
-- [Site experience template](skills/browser-operator/references/experience-template.md) · [Recipe template](skills/browser-operator/references/recipe-template.md): save verified procedures.
-- [Demo cover](skills/browser-operator/references/assets/browser-operator-cover.png): a static image for sharing the project.
-
-<details>
-<summary>See a command-line example</summary>
-
-Your agent normally runs the commands. This example uses the default installation directory; change `BROWSER` if you installed elsewhere:
+Your agent normally runs the commands for you. To see how they work, this example uses the default install directory. Change `BROWSER` for a custom installation:
 
 ```bash
 BROWSER="${DSH_HOME:-$HOME/.dsh}/skills/browser-operator/bin/browser"
@@ -151,14 +118,59 @@ BROWSER="${DSH_HOME:-$HOME/.dsh}/skills/browser-operator/bin/browser"
 "$BROWSER" stop --profile example
 ```
 
-Use the locators returned by `snapshot` for later actions. After each step, check the page changes and the actual result.
+Use the locators returned by `snapshot` for later actions. After each step, your agent still needs to check page changes and the business outcome, such as querying a record again to confirm that it was saved.
 
-</details>
+## Key features
 
-<details>
-<summary>How does it compare with Codex's browser tools?</summary>
+### Read the DOM and use real mouse input
 
-BrowserOperator can be installed as a skill in agents such as Codex, providing local Chrome control, site notes, and workflow replay. The agent needs to read skills and execute local commands.
+Your agent can inspect page structure and element attributes, locate buttons, inputs, and results by text or selector, then click, fill, select, hover, or drag. It also supports elements inside iframes and switching tabs.
+
+The default click uses Playwright's mouse input path, including scrolling, actionability checks, and hit-target checks. If an element is covered or hidden, inspect the page state and adjust the steps.
+
+### Keep your login state
+
+Save separate browser profiles for sites or accounts, retaining cookies and local storage. While a login remains valid, later visits can reuse it and avoid another sign-in.
+
+Chrome runs headlessly by default and switches to a visible window when login or verification is detected while opening a page. For sites using session cookies, enable `restore-session` when needed. Recovery still depends on the server-side session remaining valid; see [login persistence](skills/browser-operator/references/usage.md#login-persistence).
+
+### Handle some anti-bot and DevTools checks
+
+Each profile keeps a stable browser fingerprint and consistent browser identity settings across headed and headless modes. The tool includes compatibility measures for some automation markers and false positives from developer-tools detection.
+
+A site may still deny access under its own risk controls. Sliders, CAPTCHAs, and similar verification pages require you to complete the check in the visible browser before continuing.
+
+### Reuse site knowledge
+
+The skill requires your agent to read existing site notes before a task and record entry points, element locators, result extraction, and common problems after successful exploration. Later visits start with verified procedures, reducing repeated DOM inspection and exploration.
+
+Notes are saved as local Markdown files and can be reused across sessions. When a site changes or a locator fails, your agent needs to check the current page and update the notes.
+
+### Replay familiar workflows
+
+After repeatedly completing a task and verifying its steps, your agent can write an operation recipe: a JS file of named steps with parameters for search terms, environments, branches, or versions. Later tasks use `recipe run`, which checks the page and logs a line after each step, with less repeated planning.
+
+The skill calls for writing the recipe on the third successful run of the same task. Your agent writes and maintains recipes; the CLI runs them, checks parameters, keeps run records, and counts successful runs and logs them. Site changes can require updates to the recipe.
+
+### Pick up after a failure
+
+When a recipe step fails, the run stops at that step, the current page stays open, and the tool reports the step, the error, and a screenshot. You or your agent can inspect screenshots, Console, Network, and run records, then resume from that step without redoing the finished ones.
+
+`debug` collects page state, a screenshot, and recent Console and Network information together. Network records contain request URLs, status, timing, and failure reasons; request headers and bodies are not recorded by default.
+
+## From a first run to repeatable workflows
+
+1. **Check saved procedures:** Look for a matching recipe first and run it if there is one; otherwise read site notes and confirm the entry point, current environment, and task parameters.
+2. **Inspect and act:** Use DOM snapshots to locate targets, perform actions, and wait for the expected page or element state.
+3. **Verify the outcome:** Check success messages, navigation, resulting data, or version information against your acceptance criteria.
+4. **Save useful knowledge:** Update entry points, selectors, and things to watch for, then record the run's outcome.
+5. **Record stable steps:** Once a repeated task meets the skill's recording conditions, write a parameterized recipe. Prefer running it on later tasks; when it stops, find the cause, repair it, and resume from that step.
+
+Site notes, recipes, and run logs are stored separately for reuse in new sessions. See the [site experience template](skills/browser-operator/references/experience-template.md), [task index template](skills/browser-operator/references/recipe-template.md), and [recipe script template](skills/browser-operator/references/recipe-template.mjs) for their formats.
+
+## How does it compare with Codex's browser tools?
+
+BrowserOperator can be installed as a skill in agents such as Codex, providing local Chrome control, site notes, and workflow replay. The agent needs to be able to read the skill and execute local commands.
 
 Codex has several browser-control options. On macOS, controlling desktop apps through Computer Use requires Screen Recording and Accessibility permissions. Its built-in browser or connected Chrome can also inspect the DOM, Console, and Network with developer mode enabled and the appropriate access approved.
 
@@ -167,11 +179,51 @@ Codex has several browser-control options. On macOS, controlling desktop apps th
 | Entry point | A separate skill and CLI through which an agent operates local Chrome | Built-in browser, browser extension, or Computer Use, depending on the selected entry point |
 | Elements and debugging | Playwright / CDP for DOM inspection, element targeting, Console, and Network | Browser developer mode can also inspect DOM, Console, and Network with approval; desktop app control uses operating-system capabilities |
 | Sessions | Named profiles keep browser data separate for sites or accounts | The built-in browser uses its own profile; the browser extension can connect to a regular browser session |
-| Knowledge and replay | The skill specifies reading and updating site notes, with recipes that accept parameters for repeated tasks | Installed skills can extend workflows; the rules depend on the current tools and configuration |
+| Knowledge and replay | The skill specifies reading and updating site notes, with parameterized recipes for repeated tasks that resume from the failed step | Installed skills can extend workflows; the rules depend on the current tools and configuration |
+
+BrowserOperator keeps rules for maintaining site notes and repeated workflows in one skill, giving future tasks verified entry points, locators, and steps to consult. Current page state still needs checking when a site changes.
 
 For current Codex capabilities and permissions, see OpenAI's official [browser documentation](https://learn.chatgpt.com/docs/browser) and [Computer Use documentation](https://learn.chatgpt.com/docs/computer-use).
 
+## Common questions
+
+<details>
+<summary>Do I need to write code?</summary>
+
+For everyday use, just describe the task to your agent. BrowserOperator provides browser actions, and your agent decides which steps to take.
+
 </details>
+
+<details>
+<summary>How are login and verification handled?</summary>
+
+By default, you log in through the browser window before the agent continues. The agent may perform login actions only when you explicitly ask it to. Sliders and CAPTCHAs always stay with you.
+
+Detection uses page features and can be wrong. After a login or verification prompt disappears, the agent still needs to inspect the business page to confirm that it reached the intended site.
+
+</details>
+
+<details>
+<summary>Will saved notes and recipes survive site changes?</summary>
+
+They need checking. Changed entry points, renamed elements, pop-ups, or different loading behavior can invalidate old locators. A recipe stops at the step that broke and keeps the page open; your agent inspects the current DOM, updates notes and the recipe, and resumes from that step to verify it.
+
+</details>
+
+<details>
+<summary>Where is my data stored?</summary>
+
+Browser data, default screenshots, site notes, and run records are stored locally. Whether a login can be reused also depends on the site's expiry rules and session settings. See the [user guide](skills/browser-operator/references/usage.md).
+
+The default data directory is `~/.dsh/browser-operator/`: `profiles/` holds browser data, `screenshots/` holds default screenshots, `experiences/` holds site notes, `脚本/` holds recipes, and `logs/` holds site run records.
+
+</details>
+
+## Learn more
+
+- [User guide](skills/browser-operator/references/usage.md): requirements, manual installation, commands, and configuration.
+- [Skill instructions](skills/browser-operator/SKILL.md): procedures and rules for the agent.
+- [Site experience template](skills/browser-operator/references/experience-template.md) · [Task index template](skills/browser-operator/references/recipe-template.md) · [Recipe script template](skills/browser-operator/references/recipe-template.mjs): save reusable procedures.
 
 ---
 
